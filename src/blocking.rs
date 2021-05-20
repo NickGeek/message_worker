@@ -1,36 +1,149 @@
 use std::future::Future;
-use futures_core::Stream;
+use futures::Stream;
 use tokio::stream::StreamExt;
-use std::fmt::Debug;
 use anyhow::{Result, Error};
 use std::rc::Rc;
+use tokio::task::JoinHandle;
 
 use crate::Context;
 
+/// Creates a listener with the default error handler on its own system thread. It is safe to work
+/// with non-sync and non-send data in this listener. The callback (`handle_event`) will be invoked
+/// whenever a new item from the `source` stream is emitted. The `context_factory` is a closure you
+/// must provide that returns the initial state for the listener.
+///
+/// # Example
+/// ```
+/// use message_worker::blocking::listen;
+/// use message_worker::Context;
+/// use tokio::sync::RwLock;
+/// use std::rc::Rc;
+/// use anyhow::Result;
+/// use futures::StreamExt;
+/// use std::cell::RefCell;
+///
+/// # let mut rt = tokio::runtime::Runtime::new().unwrap();
+/// # rt.block_on(async {
+/// // Arrange
+/// const EXPECTED: &str = "foo";
+///
+/// struct MockCtx {
+///     // `Rc` is not threadsafe but we can safely use it here
+///     internal_state: std::rc::Rc<String>,
+///     // `RefCell` is not `Send` but we can use it here
+///     test_res: RefCell<tokio::sync::mpsc::Sender<String>>
+/// }
+/// impl Context for MockCtx {}
+///
+/// let (mut tx, rx) = tokio::sync::mpsc::channel::<()>(1);
+/// let stream = Box::pin(rx);
+///
+/// let (test_res_tx, mut test_res) = {
+///     let (tx, rx) = tokio::sync::mpsc::channel::<String>(1);
+///     (tx, Box::pin(rx))
+/// };
+///
+/// async fn mock_handle<'a>(ctx: Rc<MockCtx>, _event: ()) -> Result<()> {
+///     // Accessing from an `Rc`
+///     let str = (&*ctx.internal_state).clone();
+///
+///     // Accessing from a `RefCell`
+///     ctx.test_res.borrow_mut().send(str).await?;
+///     Ok(())
+/// }
+///
+/// // Act
+/// listen(stream, move || MockCtx {
+///     internal_state: std::rc::Rc::new(EXPECTED.to_string()),
+///     test_res: RefCell::new(test_res_tx)
+/// }, mock_handle);
+/// tx.send(()).await.unwrap();
+///
+/// // Assert
+/// assert_eq!(test_res.next().await, Some(EXPECTED.to_string()))
+/// # })
+/// ```
 pub fn listen<Ctx, CtxFactory, Source, Event, HandleEventFuture>(
     source: Source,
     context_factory: CtxFactory,
     handle_event: fn(Rc<Ctx>, Event) -> HandleEventFuture
-) where
+) -> JoinHandle<()> where
     Ctx: Context,
     CtxFactory: (FnOnce() -> Ctx) + Send + 'static,
     Source: Stream<Item = Event> + Unpin + Send + 'static,
-    Event: Debug + 'static,
+    Event: 'static,
     HandleEventFuture: Future<Output = Result<()>> + 'static,
 {
     listen_with_error_handler(source, context_factory, handle_event, default_error_handler)
 }
 
+/// This is the same as `listen` but it allows a custom error handler to be defined.
+/// The error handler callback receives the context of the listener and the error that occurred.
+/// The error handler callback returns a boolean declaring if the listener should keep running or not.
+///
+/// # Example
+/// ```
+/// use message_worker::blocking::listen_with_error_handler;
+/// use message_worker::Context;
+/// use std::cell::RefCell;
+/// use std::borrow::Cow;
+/// use std::rc::Rc;
+/// use anyhow::{Error, Result, bail};
+/// use futures::StreamExt;
+///
+/// # #[tokio::main]
+/// # async fn main() {
+/// // Arrange
+/// const EXPECTED1: &str = "rip";
+/// const EXPECTED2: &str = "oh no";
+///
+/// struct MockCtx {
+///     test_res: RefCell<tokio::sync::mpsc::Sender<Cow<'static, str>>>
+/// }
+/// impl Context for MockCtx {}
+///
+/// let (ctx, mut test_res) = {
+///     let (tx, rx) = tokio::sync::mpsc::channel(1);
+///     let stream = Box::pin(rx);
+///
+///     (MockCtx {
+///         test_res: RefCell::new(tx)
+///     }, stream)
+/// };
+///
+/// let (mut tx, rx) = tokio::sync::mpsc::channel::<Cow<'static, str>>(1);
+/// let stream = Box::pin(rx);
+///
+/// async fn mock_handle<'a>(_ctx: Rc<MockCtx>, event: Cow<'static, str>) -> Result<()> {
+///     bail!(event)
+/// }
+///
+/// async fn mock_handle_error<'a>(ctx: Rc<MockCtx>, error: Error) -> bool {
+///     ctx.test_res.borrow_mut().send(error.to_string().into()).await.unwrap();
+///     true
+/// }
+///
+/// // Act
+/// listen_with_error_handler(stream, move || ctx, mock_handle, mock_handle_error);
+/// tx.send(EXPECTED1.into()).await.unwrap();
+/// tx.send(EXPECTED2.into()).await.unwrap();
+///
+/// // Assert
+/// assert_eq!(test_res.next().await.unwrap(), Cow::Borrowed(EXPECTED1));
+/// // This keeps going because the custom error handler returned `true`
+/// assert_eq!(test_res.next().await.unwrap(), Cow::Borrowed(EXPECTED2));
+/// # }
+/// ```
 pub fn listen_with_error_handler<Ctx, CtxFactory, Source, Event, HandleEventFuture, HandleErrorFuture>(
     mut source: Source,
     context_factory: CtxFactory,
     handle_event: fn(Rc<Ctx>, Event) -> HandleEventFuture,
     handle_error: fn(Rc<Ctx>, Error) -> HandleErrorFuture
-) where
+) -> JoinHandle<()> where
     Ctx: Context,
     CtxFactory: (FnOnce() -> Ctx) + Send + 'static,
     Source: Stream<Item = Event> + Unpin + Send + 'static,
-    Event: Debug + 'static,
+    Event: 'static,
     HandleEventFuture: Future<Output = Result<()>> + 'static,
     HandleErrorFuture: Future<Output = bool> + 'static
 {
@@ -47,7 +160,7 @@ pub fn listen_with_error_handler<Ctx, CtxFactory, Source, Event, HandleEventFutu
                 }
             }
         })
-    });
+    })
 }
 
 async fn default_error_handler<C: Context>(_ctx: Rc<C>, err: Error) -> bool {
@@ -346,7 +459,10 @@ mod tests {
             async fn mock_handle(ctx: Rc<MockCtx>, _event: ()) -> Result<()> {
                 let mut runtime = ctx.runtime.borrow_mut();
 
-                runtime.execute("<test>", r#"Deno.core.print(`[should_be_able_to_store_the_runtime_on_the_ctx] Got an event!\n`);"#)?;
+                runtime.execute(
+                    "<test>",
+                    r#"Deno.core.print(`[should_be_able_to_store_the_runtime_on_the_ctx] Got an event!\n`);"#
+                )?;
                 runtime.run_event_loop().await?;
 
                 ctx.test_res.write().await.send(()).await?;
@@ -360,32 +476,19 @@ mod tests {
                     tokio_rt.block_on(async {
                         let local = tokio::task::LocalSet::new();
                         local.run_until(async {
-                            let mut failure_msg: Option<String> = None;
-
                             let mut runtime = JsRuntime::new(RuntimeOptions {
                                 module_loader: Some(Rc::new(deno_core::FsModuleLoader)),
                                 will_snapshot: false,
                                 ..RuntimeOptions::default()
                             });
 
-                            if let Err(e) = runtime.execute("<test>", r#"Deno.core.print(`[should_be_able_to_store_the_runtime_on_the_ctx] Creating runtime\n`);"#) {
-                                failure_msg = Some(match failure_msg {
-                                    Some(msg) => format!("{}\n{}", msg, e),
-                                    None => format!("{}", e)
-                                });
-                            }
+                            runtime.execute(
+                                "<test>",
+                                r#"Deno.core.print(`[should_be_able_to_store_the_runtime_on_the_ctx] Creating runtime\n`);"#
+                            ).unwrap();
+                            runtime.run_event_loop().await.unwrap();
 
-                            if let Err(e) = runtime.run_event_loop().await {
-                                failure_msg = Some(match failure_msg {
-                                    Some(msg) => format!("{}\n{}", msg, e),
-                                    None => format!("{}", e)
-                                });
-                            }
-
-                            match failure_msg {
-                                Some(msg) => Err(anyhow!("{}", msg)),
-                                None => Ok(runtime)
-                            }.unwrap()
+                            runtime
                         }).await
                     })
                 };

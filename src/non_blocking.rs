@@ -1,36 +1,43 @@
 use std::future::Future;
-use futures_core::Stream;
+use futures::Stream;
 use tokio::stream::StreamExt;
-use std::fmt::Debug;
 use anyhow::{Result, Error};
 use std::sync::Arc;
+use tokio::task::JoinHandle;
 
 use crate::ThreadSafeContext;
 
+/// Creates a listener with the default error handler on its own system thread. It is safe to work
+/// with non-sync and non-send data in this listener. The callback (`handle_event`) will be invoked
+/// whenever a new item from the `source` stream is emitted. The `context_factory` is a closure you
+/// must provide that returns the initial state for the listener.
 pub fn listen<Ctx, CtxFactory, Source, Event, HandleEventFuture>(
     source: Source,
     context_factory: CtxFactory,
     handle_event: fn(Arc<Ctx>, Event) -> HandleEventFuture
-) where
+) -> JoinHandle<()> where
     Ctx: ThreadSafeContext,
     CtxFactory: (FnOnce() -> Ctx) + Send + 'static,
     Source: Stream<Item = Event> + Unpin + Send + 'static,
-    Event: Send + Debug + 'static,
+    Event: Send + 'static,
     HandleEventFuture: Future<Output = Result<()>> + Send + 'static,
 {
     listen_with_error_handler(source, context_factory, handle_event, default_error_handler)
 }
 
+/// This is the same as `listen` but it allows a custom error handler to be defined.
+/// The error handler callback receives the context of the listener and the error that occurred.
+/// The error handler callback returns a boolean declaring if the listener should keep running or not.
 pub fn listen_with_error_handler<Ctx, CtxFactory, Source, Event, HandleEventFuture, HandleErrorFuture>(
     mut source: Source,
     context_factory: CtxFactory,
     handle_event: fn(Arc<Ctx>, Event) -> HandleEventFuture,
     handle_error: fn(Arc<Ctx>, Error) -> HandleErrorFuture
-) where
+) -> JoinHandle<()> where
     Ctx: ThreadSafeContext,
     CtxFactory: (FnOnce() -> Ctx) + Send + 'static,
     Source: Stream<Item = Event> + Unpin + Send + 'static,
-    Event: Send + Debug + 'static,
+    Event: Send + 'static,
     HandleEventFuture: Future<Output = Result<()>> + Send + 'static,
     HandleErrorFuture: Future<Output = bool> + Send + 'static
 {
@@ -43,7 +50,7 @@ pub fn listen_with_error_handler<Ctx, CtxFactory, Source, Event, HandleEventFutu
                 }
             }
         }
-    });
+    })
 }
 
 async fn default_error_handler<C: ThreadSafeContext>(_ctx: Arc<C>, err: Error) -> bool {
