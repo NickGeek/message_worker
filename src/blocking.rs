@@ -1,9 +1,8 @@
 use std::future::Future;
-use futures::Stream;
-use tokio::stream::StreamExt;
 use anyhow::{Result, Error};
 use std::rc::Rc;
 use tokio::task::JoinHandle;
+use tokio_stream::{Stream, StreamExt};
 
 use crate::Context;
 
@@ -19,8 +18,9 @@ use crate::Context;
 /// use tokio::sync::RwLock;
 /// use std::rc::Rc;
 /// use anyhow::Result;
-/// use futures::StreamExt;
 /// use std::cell::RefCell;
+/// use tokio_stream::StreamExt;
+/// use tokio_stream::wrappers::ReceiverStream;
 ///
 /// # let mut rt = tokio::runtime::Runtime::new().unwrap();
 /// # rt.block_on(async {
@@ -36,11 +36,11 @@ use crate::Context;
 /// impl Context for MockCtx {}
 ///
 /// let (mut tx, rx) = tokio::sync::mpsc::channel::<()>(1);
-/// let stream = Box::pin(rx);
+/// let stream = ReceiverStream::new(rx);
 ///
 /// let (test_res_tx, mut test_res) = {
 ///     let (tx, rx) = tokio::sync::mpsc::channel::<String>(1);
-///     (tx, Box::pin(rx))
+///     (tx, ReceiverStream::new(rx))
 /// };
 ///
 /// async fn mock_handle<'a>(ctx: Rc<MockCtx>, _event: ()) -> Result<()> {
@@ -89,7 +89,8 @@ pub fn listen<Ctx, CtxFactory, Source, Event, HandleEventFuture>(
 /// use std::borrow::Cow;
 /// use std::rc::Rc;
 /// use anyhow::{Error, Result, bail};
-/// use futures::StreamExt;
+/// use tokio_stream::StreamExt;
+/// use tokio_stream::wrappers::ReceiverStream;
 ///
 /// # #[tokio::main]
 /// # async fn main() {
@@ -104,7 +105,7 @@ pub fn listen<Ctx, CtxFactory, Source, Event, HandleEventFuture>(
 ///
 /// let (ctx, mut test_res) = {
 ///     let (tx, rx) = tokio::sync::mpsc::channel(1);
-///     let stream = Box::pin(rx);
+///     let stream = ReceiverStream::new(rx);
 ///
 ///     (MockCtx {
 ///         test_res: RefCell::new(tx)
@@ -112,7 +113,7 @@ pub fn listen<Ctx, CtxFactory, Source, Event, HandleEventFuture>(
 /// };
 ///
 /// let (mut tx, rx) = tokio::sync::mpsc::channel::<Cow<'static, str>>(1);
-/// let stream = Box::pin(rx);
+/// let stream = ReceiverStream::new(rx);
 ///
 /// async fn mock_handle<'a>(_ctx: Rc<MockCtx>, event: Cow<'static, str>) -> Result<()> {
 ///     bail!(event)
@@ -174,6 +175,7 @@ mod tests {
     use tokio::sync::RwLock;
     use std::borrow::Cow;
     use anyhow::{bail, anyhow};
+    use tokio_stream::wrappers::ReceiverStream;
 
     #[tokio::test]
     async fn should_be_able_read_ctx_from_handler() {
@@ -188,7 +190,7 @@ mod tests {
 
         let (ctx, mut test_res) = {
             let (tx, rx) = tokio::sync::mpsc::channel::<u32>(1);
-            let stream = Box::pin(rx);
+            let stream = ReceiverStream::new(rx);
 
             (MockCtx {
                 internal_state: EXPECTED,
@@ -196,8 +198,8 @@ mod tests {
             }, stream)
         };
 
-        let (mut tx, rx) = tokio::sync::mpsc::channel::<()>(1);
-        let stream = Box::pin(rx);
+        let (tx, rx) = tokio::sync::mpsc::channel::<()>(1);
+        let stream = ReceiverStream::new(rx);
 
         async fn mock_handle<'a>(ctx: Rc<MockCtx>, _event: ()) -> Result<()> {
             ctx.test_res.write().await.send(ctx.internal_state).await?;
@@ -223,12 +225,12 @@ mod tests {
         }
         impl Context for MockCtx {}
 
-        let (mut tx, rx) = tokio::sync::mpsc::channel::<()>(1);
-        let stream = Box::pin(rx);
+        let (tx, rx) = tokio::sync::mpsc::channel::<()>(1);
+        let stream = ReceiverStream::new(rx);
 
         let (test_res_tx, mut test_res) = {
             let (tx, rx) = tokio::sync::mpsc::channel::<String>(1);
-            (tx, Box::pin(rx))
+            (tx, ReceiverStream::new(rx))
         };
 
         async fn mock_handle<'a>(ctx: Rc<MockCtx>, _event: ()) -> Result<()> {
@@ -260,15 +262,15 @@ mod tests {
 
         let (ctx, mut test_res) = {
             let (tx, rx) = tokio::sync::mpsc::channel::<u32>(1);
-            let stream = Box::pin(rx);
+            let stream = ReceiverStream::new(rx);
 
             (MockCtx {
                 test_res: RwLock::new(tx)
             }, stream)
         };
 
-        let (mut tx, rx) = tokio::sync::mpsc::channel::<u32>(1);
-        let stream = Box::pin(rx);
+        let (tx, rx) = tokio::sync::mpsc::channel::<u32>(1);
+        let stream = ReceiverStream::new(rx);
 
         async fn mock_handle<'a>(ctx: Rc<MockCtx>, event: u32) -> Result<()> {
             ctx.test_res.write().await.send(event).await?;
@@ -295,15 +297,15 @@ mod tests {
 
         let (ctx, mut test_res) = {
             let (tx, rx) = tokio::sync::mpsc::channel(1);
-            let stream = Box::pin(rx);
+            let stream = ReceiverStream::new(rx);
 
             (MockCtx {
                 test_res: RwLock::new(tx)
             }, stream)
         };
 
-        let (mut tx, rx) = tokio::sync::mpsc::channel::<()>(1);
-        let stream = Box::pin(rx);
+        let (tx, rx) = tokio::sync::mpsc::channel::<()>(1);
+        let stream = ReceiverStream::new(rx);
 
         async fn mock_handle<'a>(_ctx: Rc<MockCtx>, _event: ()) -> Result<()> {
             bail!("rip")
@@ -335,15 +337,15 @@ mod tests {
 
         let (ctx, mut test_res) = {
             let (tx, rx) = tokio::sync::mpsc::channel(1);
-            let stream = Box::pin(rx);
+            let stream = ReceiverStream::new(rx);
 
             (MockCtx {
                 test_res: RwLock::new(tx)
             }, stream)
         };
 
-        let (mut tx, rx) = tokio::sync::mpsc::channel::<Cow<'static, str>>(1);
-        let stream = Box::pin(rx);
+        let (tx, rx) = tokio::sync::mpsc::channel::<Cow<'static, str>>(1);
+        let stream = ReceiverStream::new(rx);
 
         async fn mock_handle<'a>(_ctx: Rc<MockCtx>, event: Cow<'static, str>) -> Result<()> {
             bail!(event)
@@ -379,15 +381,15 @@ mod tests {
 
             let (ctx, mut test_res) = {
                 let (tx, rx) = tokio::sync::mpsc::channel(1);
-                let stream = Box::pin(rx);
+                let stream = ReceiverStream::new(rx);
 
                 (MockCtx {
                     test_res: RwLock::new(tx)
                 }, stream)
             };
 
-            let (mut tx, rx) = tokio::sync::mpsc::channel::<()>(1);
-            let stream = Box::pin(rx);
+            let (tx, rx) = tokio::sync::mpsc::channel::<()>(1);
+            let stream = ReceiverStream::new(rx);
 
             async fn mock_handle(ctx: Rc<MockCtx>, _event: ()) -> Result<()> {
                 let mut failure_msg: Option<String> = None;
@@ -448,12 +450,12 @@ mod tests {
             }
             impl Context for MockCtx {}
 
-            let (mut tx, rx) = tokio::sync::mpsc::channel::<()>(1);
-            let stream = Box::pin(rx);
+            let (tx, rx) = tokio::sync::mpsc::channel::<()>(1);
+            let stream = ReceiverStream::new(rx);
 
             let (test_res_tx, mut test_res) = {
                 let (tx, rx) = tokio::sync::mpsc::channel::<()>(1);
-                (tx, Box::pin(rx))
+                (tx, ReceiverStream::new(rx))
             };
 
             async fn mock_handle(ctx: Rc<MockCtx>, _event: ()) -> Result<()> {
