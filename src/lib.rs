@@ -8,7 +8,7 @@
 //! This is a fairly low-level library that can be used to build a wide-array of stream-processing
 //! and event-driven systems. It can even be used to build actor systems!
 //!
-//! This library must be used in a [tokio](https://tokio.rs/) runtime, specifically version 0.2.
+//! This library must be used in a [tokio](https://tokio.rs/) runtime.
 //!
 //! # Examples
 //! ## Printer
@@ -17,7 +17,6 @@
 //! use message_worker::{Context, ThreadSafeContext};
 //! use std::sync::Arc;
 //! use anyhow::Result;
-//! use futures::stream;
 //!
 //! let mut rt = tokio::runtime::Runtime::new().unwrap();
 //! rt.block_on(async {
@@ -26,7 +25,7 @@
 //!     impl Context for EmptyCtx {} impl ThreadSafeContext for EmptyCtx {}
 //!
 //!     // Create our stream
-//!     let source = stream::iter(vec![42, 0xff6900, 1337]);
+//!     let source = tokio_stream::iter(vec![42, 0xff6900, 1337]);
 //!
 //!     // Create a listener that prints out each item in the stream
 //!     async fn on_item(_ctx: Arc<EmptyCtx>, event: usize) -> Result<()> {
@@ -51,9 +50,9 @@
 //! use message_worker::{Context, ThreadSafeContext};
 //! use std::sync::Arc;
 //! use anyhow::Result;
-//! use futures::stream;
 //! use tokio::sync::RwLock;
-//! use tokio::stream::StreamExt;
+//! use tokio_stream::StreamExt;
+//! use tokio_stream::wrappers::ReceiverStream;
 //!
 //! let mut rt = tokio::runtime::Runtime::new().unwrap();
 //! rt.block_on(async {
@@ -61,7 +60,7 @@
 //!     impl Context for BiCtx {} impl ThreadSafeContext for BiCtx {}
 //!
 //!     // Create our stream
-//!     let source = stream::iter(vec![42, 0xff6900, 1337]);
+//!     let source = tokio_stream::iter(vec![42, 0xff6900, 1337]);
 //!
 //!     // Create a listener that outputs each item in the stream multiplied by two
 //!     async fn on_item(ctx: Arc<BiCtx>, event: usize) -> Result<()> {
@@ -71,11 +70,12 @@
 //!     }
 //!
 //!     // Connect the number stream to `on_item`
-//!     let (tx, mut rx) = tokio::sync::mpsc::channel::<usize>(3);
+//!     let (tx, rx) = tokio::sync::mpsc::channel::<usize>(3);
 //!     listen(source, move || BiCtx {
 //!         output: RwLock::new(tx)
 //!     }, on_item);
 //!
+//!     let mut  rx = ReceiverStream::new(rx);
 //!     assert_eq!(rx.next().await, Some(84));
 //!     assert_eq!(rx.next().await, Some(0x1fed200));
 //!     assert_eq!(rx.next().await, Some(2674));
@@ -87,10 +87,10 @@
 //! use message_worker::non_blocking::listen;
 //! use message_worker::{Context, ThreadSafeContext};
 //! use std::sync::Arc;
-//! use anyhow::{Result, bail};
-//! use futures::stream;
+//! use anyhow::{Result, bail, anyhow};
 //! use tokio::sync::RwLock;
-//! use tokio::stream::StreamExt;
+//! use tokio_stream::wrappers::BroadcastStream;
+//! use tokio_stream::StreamExt;
 //!
 //! let mut rt = tokio::runtime::Runtime::new().unwrap();
 //! rt.block_on(async {
@@ -101,14 +101,16 @@
 //!     #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 //!     enum Message { Ping, Pong }
 //!
-//!     // Create our initial stream
-//!     let initial_ping = stream::iter(vec![Message::Ping]);
 //!
 //!     // Create the ping actor
 //!     async fn ping_actor(ctx: Arc<ActorCtx>, event: Message) -> Result<()> {
 //!         match event {
 //!             Message::Ping => bail!("I'm meant to be the pinger!"),
-//!             Message::Pong => ctx.output.write().await.send(Message::Ping).unwrap()
+//!             Message::Pong =>
+//!                 ctx.output
+//!                     .write().await
+//!                     .send(Message::Ping)
+//!                     .map_err(|err| anyhow!(err))?
 //!         };
 //!         Ok(())
 //!     }
@@ -116,36 +118,43 @@
 //!     // Create the pong actor
 //!     async fn pong_actor(ctx: Arc<ActorCtx>, event: Message) -> Result<()> {
 //!         match event {
-//!             Message::Ping => ctx.output.write().await.send(Message::Pong).unwrap(),
+//!             Message::Ping =>
+//!                 ctx.output
+//!                     .write().await
+//!                     .send(Message::Pong)
+//!                     .map_err(|err| anyhow!(err))?,
 //!             Message::Pong => bail!("I'm meant to be the ponger!")
 //!         };
 //!         Ok(())
 //!     }
 //!
+//!     // Create our initial stream
+//!     let initial_ping = tokio_stream::iter(vec![Message::Ping]);
+//!
 //!     // Connect everything together
 //!     let (tx_ping, mut rx_ping) = tokio::sync::broadcast::channel::<Message>(128);
 //!     let (tx_pong, mut rx_pong) = tokio::sync::broadcast::channel::<Message>(128);
-//!     let mut watch_pongs = tx_ping.clone().subscribe();
-//!     let mut watch_pings = tx_pong.clone().subscribe();
+//!     let mut watch_pongs = BroadcastStream::new(tx_ping.clone().subscribe()).map(|msg| msg.unwrap());
+//!     let mut watch_pings = BroadcastStream::new(tx_pong.clone().subscribe()).map(|msg| msg.unwrap());
 //!
 //!     // Start the ping actor
 //!     listen(
-//!         Box::pin(rx_ping.into_stream().map(|msg| msg.unwrap())),
+//!         BroadcastStream::new(rx_ping).map(|msg| msg.unwrap()),
 //!         move || ActorCtx { output: RwLock::new(tx_pong) },
 //!         ping_actor
 //!     );
 //!
 //!     // Start the pong actor
 //!     listen(
-//!         tokio::stream::StreamExt::chain(initial_ping, Box::pin(rx_pong.into_stream().map(|msg| msg.unwrap()))),
+//!         initial_ping.chain(BroadcastStream::new(rx_pong).map(|msg| msg.unwrap())),
 //!         move || ActorCtx { output: RwLock::new(tx_ping) },
 //!         pong_actor
 //!     );
 //!
-//!     assert_eq!(watch_pings.recv().await, Ok(Message::Ping));
-//!     assert_eq!(watch_pongs.recv().await, Ok(Message::Pong));
-//!     assert_eq!(watch_pings.recv().await, Ok(Message::Ping));
-//!     assert_eq!(watch_pongs.recv().await, Ok(Message::Pong));
+//!     assert_eq!(watch_pings.next().await, Some(Message::Ping));
+//!     assert_eq!(watch_pongs.next().await, Some(Message::Pong));
+//!     assert_eq!(watch_pings.next().await, Some(Message::Ping));
+//!     assert_eq!(watch_pongs.next().await, Some(Message::Pong));
 //! })
 //! ```
 //!
@@ -157,7 +166,8 @@
 //! use deno_core::{JsRuntime, RuntimeOptions};
 //! use std::rc::Rc;
 //! use anyhow::Result;
-//! use futures::StreamExt;
+//! use tokio_stream::StreamExt;
+//! use tokio_stream::wrappers::ReceiverStream;
 //!
 //! let mut rt = tokio::runtime::Runtime::new().unwrap();
 //! rt.block_on(async {
@@ -168,11 +178,11 @@
 //!     impl Context for MockCtx {}
 //!
 //!     let (mut tx, rx) = tokio::sync::mpsc::channel::<()>(1);
-//!     let stream = Box::pin(rx);
+//!     let stream = ReceiverStream::new(rx);
 //!
 //!     let (test_res_tx, mut test_res) = {
 //!         let (tx, rx) = tokio::sync::mpsc::channel::<()>(1);
-//!         (tx, Box::pin(rx))
+//!         (tx, ReceiverStream::new(rx))
 //!     };
 //!
 //!     async fn mock_handle(ctx: Rc<MockCtx>, _event: ()) -> Result<()> {
@@ -246,14 +256,8 @@ pub mod non_blocking;
 /// runtime guarantees that it will never attempt to access your context in parallel from one listener.
 pub trait Context: 'static {}
 
-/// This trait needs to be implemented by the item you're using as the state for the listener. If
-/// you are using a [`non_blocking`](non_blocking) listener. As with `Context`, you can also use an
-/// empty struct here if you have no state:
-/// ```
-/// use message_worker::{Context, ThreadSafeContext};
-/// struct EmptyCtx;
-/// impl Context for EmptyCtx {} impl ThreadSafeContext for EmptyCtx {}
-/// ```
+/// If you are using a [`non_blocking`](non_blocking) listener, this implementation is required
+/// alongside `Context`.
 ///
 /// For mutability inside a `Context`
 /// you can use [Mutex](https://doc.rust-lang.org/std/sync/struct.Mutex.html)es
@@ -261,6 +265,11 @@ pub trait Context: 'static {}
 /// The Message Worker runtime guarantees that it will never attempt to access your context
 /// in parallel from one listener.
 pub trait ThreadSafeContext: Context + Send + Sync {}
+
+/// A predefined context for listeners that don't need any state.
+pub struct EmptyCtx;
+impl Context for EmptyCtx {}
+impl ThreadSafeContext for EmptyCtx {}
 
 #[cfg(test)]
 mod tests {}
