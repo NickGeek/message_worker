@@ -1,0 +1,37 @@
+name: Create Release + Publish
+
+on:
+  push:
+    branches:
+    - main
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v2
+    - name: Run tests
+      run: cargo test --verbose
+    - name: Check Release Version
+      id: version_check_staging
+      uses: thebongy/version-check@v1
+      with:
+        file: Cargo.toml
+        tagFormat: v${version}
+    - name: Create Release
+      id: create_release
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ steps.version_check_staging.outputs.releaseVersion }}
+        release_name: ${{ steps.version_check_staging.outputs.releaseVersion }}
+        draft: false
+        prerelease: false
+    - name: Publish to crates.io
+      run: |
+          cargo login ${{ secrets.CRATES_IO_TOKEN }}
+          cargo publish
