@@ -1,6 +1,6 @@
 [package]
 name = "message_worker"
-version = "0.3.0"
+version = "0.4.0"
 authors = ["Nick Webster <nick@nick.geek.nz>"]
 repository = "https://github.com/NickGeek/message_worker/"
 description = "Message Worker is a low-ish level library for Rust for the creation of event-listeners using futures and streams. Notably MW supports non-sync and non-send (i.e. non-thread-safe) contexts within listeners."
