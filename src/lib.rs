@@ -77,7 +77,7 @@
 //! ```
 //!
 //! ## Ping-pong (Actors)
-//! ```
+//! ```no_run
 //! use message_worker::non_blocking::listen;
 //! use message_worker::{Context, ThreadSafeContext};
 //! use std::sync::Arc;
@@ -99,7 +99,7 @@
 //!     async fn ping_actor(ctx: &mut ActorCtx, event: Message) -> Result<()> {
 //!         match event {
 //!             Message::Ping => bail!("I'm meant to be the pinger!"),
-//!             Message::Pong => ctx.output.send(Message::Ping).map_err(|err| anyhow!(err))?
+//!             Message::Pong => { let _ = ctx.output.send(Message::Ping); }
 //!         };
 //!         Ok(())
 //!     }
@@ -107,7 +107,7 @@
 //!     // Create the pong actor
 //!     async fn pong_actor(ctx: &mut ActorCtx, event: Message) -> Result<()> {
 //!         match event {
-//!             Message::Ping => ctx.output.send(Message::Pong).map_err(|err| anyhow!(err))?,
+//!             Message::Ping => { let _ = ctx.output.send(Message::Pong); },
 //!             Message::Pong => bail!("I'm meant to be the ponger!")
 //!         };
 //!         Ok(())
@@ -117,8 +117,8 @@
 //!     let initial_ping = tokio_stream::iter(vec![Message::Ping]);
 //!
 //!     // Connect everything together
-//!     let (tx_ping, rx_ping) = tokio::sync::broadcast::channel::<Message>(128);
-//!     let (tx_pong, rx_pong) = tokio::sync::broadcast::channel::<Message>(128);
+//!     let (tx_ping, rx_ping) = tokio::sync::broadcast::channel::<Message>(2);
+//!     let (tx_pong, rx_pong) = tokio::sync::broadcast::channel::<Message>(2);
 //!     let mut watch_pongs = BroadcastStream::new(tx_ping.clone().subscribe())
 //!         .filter(|msg| msg.is_ok())
 //!         .map(|msg| msg.unwrap());
