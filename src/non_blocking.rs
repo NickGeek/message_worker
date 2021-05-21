@@ -1,50 +1,51 @@
 use std::future::Future;
 use anyhow::{Result, Error};
-use std::sync::Arc;
 use tokio::task::JoinHandle;
 use tokio_stream::{Stream, StreamExt};
 
 use crate::ThreadSafeContext;
+use crate::context_holder::ContextHolder;
 
 /// Creates a listener with the default error handler on its own system thread. It is safe to work
-/// with non-sync and non-send data in this listener. The callback (`handle_event`) will be invoked
+/// with non-sync and non-send data in this listener. The callback (`handle_message`) will be invoked
 /// whenever a new item from the `source` stream is emitted. The `context_factory` is a closure you
 /// must provide that returns the initial state for the listener.
-pub fn listen<Ctx, CtxFactory, Source, Event, HandleEventFuture>(
+pub fn listen<Ctx, CtxFactory, Source, Message, HandleMessageFuture>(
     source: Source,
     context_factory: CtxFactory,
-    handle_event: fn(Arc<Ctx>, Event) -> HandleEventFuture
+    handle_message: fn(&'static mut Ctx, Message) -> HandleMessageFuture
 ) -> JoinHandle<()> where
     Ctx: ThreadSafeContext,
     CtxFactory: (FnOnce() -> Ctx) + Send + 'static,
-    Source: Stream<Item = Event> + Unpin + Send + 'static,
-    Event: Send + 'static,
-    HandleEventFuture: Future<Output = Result<()>> + Send + 'static,
+    Source: Stream<Item =Message> + Unpin + Send + 'static,
+    Message: Send + 'static,
+    HandleMessageFuture: Future<Output = Result<()>> + Send + 'static,
 {
-    listen_with_error_handler(source, context_factory, handle_event, default_error_handler)
+    listen_with_error_handler(source, context_factory, handle_message, default_error_handler)
 }
 
 /// This is the same as `listen` but it allows a custom error handler to be defined.
 /// The error handler callback receives the context of the listener and the error that occurred.
 /// The error handler callback returns a boolean declaring if the listener should keep running or not.
-pub fn listen_with_error_handler<Ctx, CtxFactory, Source, Event, HandleEventFuture, HandleErrorFuture>(
+pub fn listen_with_error_handler<Ctx, CtxFactory, Source, Message, HandleMessageFuture, HandleErrorFuture>(
     mut source: Source,
     context_factory: CtxFactory,
-    handle_event: fn(Arc<Ctx>, Event) -> HandleEventFuture,
-    handle_error: fn(Arc<Ctx>, Error) -> HandleErrorFuture
+    handle_message: fn(&'static mut Ctx, Message) -> HandleMessageFuture,
+    handle_error: fn(&'static mut Ctx, Error) -> HandleErrorFuture
 ) -> JoinHandle<()> where
     Ctx: ThreadSafeContext,
     CtxFactory: (FnOnce() -> Ctx) + Send + 'static,
-    Source: Stream<Item = Event> + Unpin + Send + 'static,
-    Event: Send + 'static,
-    HandleEventFuture: Future<Output = Result<()>> + Send + 'static,
+    Source: Stream<Item =Message> + Unpin + Send + 'static,
+    Message: Send + 'static,
+    HandleMessageFuture: Future<Output = Result<()>> + Send + 'static,
     HandleErrorFuture: Future<Output = bool> + Send + 'static
 {
     tokio::spawn(async move {
-        let context = Arc::new(context_factory());
-        while let Some(event) = source.next().await {
-            if let Err(err) = handle_event(context.clone(), event).await {
-                if !handle_error(context.clone(), err).await {
+        let mut context = ContextHolder::new(context_factory());
+
+        while let Some(message) = source.next().await {
+            if let Err(err) = handle_message(context.get_mut(), message).await {
+                if !handle_error(context.get_mut(), err).await {
                     break;
                 }
             }
@@ -52,7 +53,7 @@ pub fn listen_with_error_handler<Ctx, CtxFactory, Source, Event, HandleEventFutu
     })
 }
 
-async fn default_error_handler<C: ThreadSafeContext>(_ctx: Arc<C>, err: Error) -> bool {
+async fn default_error_handler<Ctx: ThreadSafeContext>(_ctx: &mut Ctx, err: Error) -> bool {
     eprintln!("There was an error running the message worker: {:?}", err);
     false
 }
@@ -60,7 +61,7 @@ async fn default_error_handler<C: ThreadSafeContext>(_ctx: Arc<C>, err: Error) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
+    use std::sync::{Mutex, Arc};
     use std::borrow::Cow;
     use anyhow::{bail, anyhow};
 
@@ -93,7 +94,7 @@ mod tests {
         let (tx, rx) = tokio::sync::mpsc::channel::<()>(1);
         let stream = ReceiverStream::new(rx);
 
-        async fn mock_handle<'a>(ctx: Arc<MockCtx>, _event: ()) -> Result<()> {
+        async fn mock_handle(ctx: &mut MockCtx, _msg: ()) -> Result<()> {
             ctx.test_res.send(ctx.internal_state).await?;
             Ok(())
         }
@@ -133,7 +134,7 @@ mod tests {
         let (tx, rx) = tokio::sync::mpsc::channel(1);
         let stream = ReceiverStream::new(rx);
 
-        async fn mock_handle<'a>(ctx: Arc<MockCtx>, _event: ()) -> Result<()> {
+        async fn mock_handle(ctx: &mut MockCtx, _event: ()) -> Result<()> {
             {
                 let mut str = ctx.internal_state
                     .lock()
@@ -179,7 +180,7 @@ mod tests {
         let (tx, rx) = tokio::sync::mpsc::channel::<u32>(1);
         let stream = ReceiverStream::new(rx);
 
-        async fn mock_handle<'a>(ctx: Arc<MockCtx>, event: u32) -> Result<()> {
+        async fn mock_handle(ctx: &mut MockCtx, event: u32) -> Result<()> {
             ctx.test_res.send(event).await?;
             Ok(())
         }
@@ -215,11 +216,11 @@ mod tests {
         let (tx, rx) = tokio::sync::mpsc::channel::<()>(1);
         let stream = ReceiverStream::new(rx);
 
-        async fn mock_handle<'a>(_ctx: Arc<MockCtx>, _event: ()) -> Result<()> {
+        async fn mock_handle(_ctx: &mut MockCtx, _event: ()) -> Result<()> {
             bail!("rip")
         }
 
-        async fn mock_handle_error<'a>(ctx: Arc<MockCtx>, error: Error) -> bool {
+        async fn mock_handle_error(ctx: &mut MockCtx, error: Error) -> bool {
             ctx.test_res.send(error.to_string().into()).await.unwrap();
             false
         }
@@ -256,11 +257,11 @@ mod tests {
         let (tx, rx) = tokio::sync::mpsc::channel::<Cow<'static, str>>(1);
         let stream = ReceiverStream::new(rx);
 
-        async fn mock_handle<'a>(_ctx: Arc<MockCtx>, event: Cow<'static, str>) -> Result<()> {
+        async fn mock_handle(_ctx: &mut MockCtx, event: Cow<'static, str>) -> Result<()> {
             bail!(event)
         }
 
-        async fn mock_handle_error<'a>(ctx: Arc<MockCtx>, error: Error) -> bool {
+        async fn mock_handle_error(ctx: &mut MockCtx, error: Error) -> bool {
             ctx.test_res.send(error.to_string().into()).await.unwrap();
             true
         }

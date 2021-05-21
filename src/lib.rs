@@ -14,21 +14,17 @@
 //! ## Printer
 //! ```
 //! use message_worker::non_blocking::listen;
-//! use message_worker::{Context, ThreadSafeContext};
+//! use message_worker::EmptyCtx;
 //! use std::sync::Arc;
 //! use anyhow::Result;
 //!
 //! let mut rt = tokio::runtime::Runtime::new().unwrap();
 //! rt.block_on(async {
-//!     // We don't need any state for this example
-//!     struct EmptyCtx;
-//!     impl Context for EmptyCtx {} impl ThreadSafeContext for EmptyCtx {}
-//!
 //!     // Create our stream
 //!     let source = tokio_stream::iter(vec![42, 0xff6900, 1337]);
 //!
 //!     // Create a listener that prints out each item in the stream
-//!     async fn on_item(_ctx: Arc<EmptyCtx>, event: usize) -> Result<()> {
+//!     async fn on_item(_ctx: &mut EmptyCtx, event: usize) -> Result<()> {
 //!         eprintln!("{}", event);
 //!         Ok(())
 //!     }
@@ -62,7 +58,7 @@
 //!     let source = tokio_stream::iter(vec![42, 0xff6900, 1337]);
 //!
 //!     // Create a listener that outputs each item in the stream multiplied by two
-//!     async fn on_item(ctx: Arc<BiCtx>, event: usize) -> Result<()> {
+//!     async fn on_item(ctx: &mut BiCtx, event: usize) -> Result<()> {
 //!         ctx.output.send(event * 2).await?; // Send the output
 //!         Ok(())
 //!     }
@@ -100,7 +96,7 @@
 //!
 //!
 //!     // Create the ping actor
-//!     async fn ping_actor(ctx: Arc<ActorCtx>, event: Message) -> Result<()> {
+//!     async fn ping_actor(ctx: &mut ActorCtx, event: Message) -> Result<()> {
 //!         match event {
 //!             Message::Ping => bail!("I'm meant to be the pinger!"),
 //!             Message::Pong => ctx.output.send(Message::Ping).map_err(|err| anyhow!(err))?
@@ -109,7 +105,7 @@
 //!     }
 //!
 //!     // Create the pong actor
-//!     async fn pong_actor(ctx: Arc<ActorCtx>, event: Message) -> Result<()> {
+//!     async fn pong_actor(ctx: &mut ActorCtx, event: Message) -> Result<()> {
 //!         match event {
 //!             Message::Ping => ctx.output.send(Message::Pong).map_err(|err| anyhow!(err))?,
 //!             Message::Pong => bail!("I'm meant to be the ponger!")
@@ -121,8 +117,8 @@
 //!     let initial_ping = tokio_stream::iter(vec![Message::Ping]);
 //!
 //!     // Connect everything together
-//!     let (tx_ping, rx_ping) = tokio::sync::broadcast::channel::<Message>(2);
-//!     let (tx_pong, rx_pong) = tokio::sync::broadcast::channel::<Message>(2);
+//!     let (tx_ping, rx_ping) = tokio::sync::broadcast::channel::<Message>(128);
+//!     let (tx_pong, rx_pong) = tokio::sync::broadcast::channel::<Message>(128);
 //!     let mut watch_pongs = BroadcastStream::new(tx_ping.clone().subscribe())
 //!         .filter(|msg| msg.is_ok())
 //!         .map(|msg| msg.unwrap());
@@ -159,7 +155,6 @@
 //! ```
 //! use message_worker::blocking::listen;
 //! use message_worker::Context;
-//! use std::cell::RefCell;
 //! use deno_core::{JsRuntime, RuntimeOptions};
 //! use std::rc::Rc;
 //! use anyhow::Result;
@@ -169,8 +164,8 @@
 //! let mut rt = tokio::runtime::Runtime::new().unwrap();
 //! rt.block_on(async {
 //!     struct MockCtx {
-//!         test_res: RefCell<tokio::sync::mpsc::Sender<()>>,
-//!         runtime: RefCell<JsRuntime>
+//!         test_res: tokio::sync::mpsc::Sender<()>,
+//!         runtime: JsRuntime
 //!     }
 //!     impl Context for MockCtx {}
 //!
@@ -182,8 +177,8 @@
 //!         (tx, ReceiverStream::new(rx))
 //!     };
 //!
-//!     async fn mock_handle(ctx: Rc<MockCtx>, _event: ()) -> Result<()> {
-//!         let mut runtime = ctx.runtime.borrow_mut();
+//!     async fn mock_handle(ctx: &mut MockCtx, _event: ()) -> Result<()> {
+//!         let runtime = &mut ctx.runtime;
 //!
 //!         runtime.execute(
 //!             "<test>",
@@ -191,7 +186,7 @@
 //!         )?;
 //!         runtime.run_event_loop().await?;
 //!
-//!         ctx.test_res.borrow_mut().send(()).await?;
+//!         ctx.test_res.send(()).await?;
 //!         Ok(())
 //!     }
 //!
@@ -219,8 +214,8 @@
 //!         };
 //!
 //!         MockCtx {
-//!             test_res: RefCell::new(test_res_tx),
-//!             runtime: RefCell::new(runtime)
+//!             test_res: test_res_tx,
+//!             runtime
 //!         }
 //!     }, mock_handle);
 //!     tx.send(()).await.unwrap();
@@ -238,6 +233,7 @@
 pub mod blocking;
 /// Listeners that don't block and work with threadsafe (`Sync` + `Send`) data.
 pub mod non_blocking;
+mod context_holder;
 
 /// This trait needs to be implemented by the item you're using as the state for the listener.
 ///
@@ -248,19 +244,13 @@ pub mod non_blocking;
 /// impl Context for EmptyCtx {}
 /// ```
 ///
-/// `EmptyCtx` can now be used as the context for your listeners. For mutability inside a `Context`
-/// you can use [RefCell](https://doc.rust-lang.org/std/cell/struct.RefCell.html)s. The Message Worker
+/// `EmptyCtx` can now be used as the context for your listeners. The Message Worker
 /// runtime guarantees that it will never attempt to access your context in parallel from one listener.
 pub trait Context: 'static {}
 
 /// If you are using a [`non_blocking`](non_blocking) listener, this implementation is required
 /// alongside `Context`.
 ///
-/// For mutability inside a `Context`
-/// you can use [Mutex](https://doc.rust-lang.org/std/sync/struct.Mutex.html)es
-/// or [RwLock](https://docs.rs/tokio/0.2/tokio/sync/struct.RwLock.html)s. In the case where the
-/// listener will br the only one with access to the item, using the standard libraries `Mutex`es/`RwLock`s
-/// can provide better performance than tokio's.
 /// The Message Worker runtime guarantees that it will never attempt to access your context
 /// in parallel from one listener.
 pub trait ThreadSafeContext: Context + Send + Sync {}
@@ -276,7 +266,6 @@ mod tests {
     async fn ping_pong() {
         use crate::non_blocking::listen;
         use crate::{Context, ThreadSafeContext};
-        use std::sync::Arc;
         use anyhow::{Result, bail, anyhow};
         use tokio_stream::wrappers::BroadcastStream;
         use tokio_stream::StreamExt;
@@ -290,7 +279,7 @@ mod tests {
 
 
         // Create the ping actor
-        async fn ping_actor(ctx: Arc<ActorCtx>, event: Message) -> Result<()> {
+        async fn ping_actor(ctx: &mut ActorCtx, event: Message) -> Result<()> {
             match event {
                 Message::Ping => bail!("I'm meant to be the pinger!"),
                 Message::Pong => ctx.output.send(Message::Ping).map_err(|err| anyhow!(err))?
@@ -299,7 +288,7 @@ mod tests {
         }
 
         // Create the pong actor
-        async fn pong_actor(ctx: Arc<ActorCtx>, event: Message) -> Result<()> {
+        async fn pong_actor(ctx: &mut ActorCtx, event: Message) -> Result<()> {
             match event {
                 Message::Ping => ctx.output.send(Message::Pong).map_err(|err| anyhow!(err))?,
                 Message::Pong => bail!("I'm meant to be the ponger!")

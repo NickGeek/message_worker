@@ -11,6 +11,10 @@ categories = ["asynchronous", "concurrency"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[[bench]]
+name = "benchmarks"
+harness = false
+
 [dependencies]
 tokio = { version = "^1.6.0", features = ["rt-multi-thread", "sync", "parking_lot"] }
 tokio-stream = { version = "~0.1.6", features = ["sync"] }
@@ -19,4 +23,5 @@ anyhow = "^1.0.40"
 [dev-dependencies]
 tokio = { version = "^1.6.0", features = ["rt-multi-thread", "sync", "parking_lot", "macros", "test-util"] }
 deno_core = "~0.88.0"
-criterion = "~0.3.4"
+criterion = { version = "~0.3.4", features = ["async_tokio", "html_reports"] }
+futures = "~0.3.15"

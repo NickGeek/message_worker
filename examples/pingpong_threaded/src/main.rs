@@ -3,7 +3,6 @@ use message_worker::{Context, EmptyCtx};
 use message_worker::blocking::{listen, listen_with_error_handler};
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
-use std::rc::Rc;
 
 struct ActorCtx { output: tokio::sync::broadcast::Sender<Message> }
 impl Context for ActorCtx {}
@@ -13,7 +12,7 @@ impl Context for ActorCtx {}
 enum Message { Ping, Pong }
 
 // Create the ping actor
-async fn ping_actor(ctx: Rc<ActorCtx>, event: Message) -> Result<()> {
+async fn ping_actor(ctx: &mut ActorCtx, event: Message) -> Result<()> {
     match event {
         Message::Ping => bail!("I'm meant to be the pinger!"),
         Message::Pong => ctx.output.send(Message::Ping).map_err(|err| anyhow!(err))?
@@ -22,7 +21,7 @@ async fn ping_actor(ctx: Rc<ActorCtx>, event: Message) -> Result<()> {
 }
 
 // Create the pong actor
-async fn pong_actor(ctx: Rc<ActorCtx>, event: Message) -> Result<()> {
+async fn pong_actor(ctx: &mut ActorCtx, event: Message) -> Result<()> {
     match event {
         Message::Ping => ctx.output.send(Message::Pong).map_err(|err| anyhow!(err))?,
         Message::Pong => bail!("I'm meant to be the ponger!")
@@ -30,12 +29,12 @@ async fn pong_actor(ctx: Rc<ActorCtx>, event: Message) -> Result<()> {
     Ok(())
 }
 
-async fn error_handler(_ctx: Rc<ActorCtx>, error: Error) -> bool {
+async fn error_handler(_ctx: &mut ActorCtx, error: Error) -> bool {
     eprintln!("There was an error sending an item: {:?}", error);
     true
 }
 
-async fn printer(_ctx: Rc<EmptyCtx>, msg: Message) -> Result<()> {
+async fn printer(_ctx: &mut EmptyCtx, msg: Message) -> Result<()> {
     println!("{:?}", msg);
     Ok(())
 }
