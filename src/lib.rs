@@ -77,7 +77,7 @@
 //! ```
 //!
 //! ## Ping-pong (Actors)
-//! ```
+//! ```no_run
 //! use message_worker::non_blocking::listen;
 //! use message_worker::{Context, ThreadSafeContext};
 //! use std::sync::Arc;
