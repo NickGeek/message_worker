@@ -60,9 +60,9 @@ async fn default_error_handler<C: ThreadSafeContext>(_ctx: Arc<C>, err: Error) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::sync::RwLock;
+    use std::sync::Mutex;
     use std::borrow::Cow;
-    use anyhow::bail;
+    use anyhow::{bail, anyhow};
 
     use crate::Context;
     use tokio_stream::StreamExt;
@@ -75,7 +75,7 @@ mod tests {
 
         struct MockCtx {
             internal_state: u32,
-            test_res: RwLock<tokio::sync::mpsc::Sender<u32>>
+            test_res: tokio::sync::mpsc::Sender<u32>
         }
         impl Context for MockCtx {}
         impl ThreadSafeContext for MockCtx {}
@@ -86,7 +86,7 @@ mod tests {
 
             (MockCtx {
                 internal_state: EXPECTED,
-                test_res: RwLock::new(tx)
+                test_res: tx
             }, stream)
         };
 
@@ -94,7 +94,7 @@ mod tests {
         let stream = ReceiverStream::new(rx);
 
         async fn mock_handle<'a>(ctx: Arc<MockCtx>, _event: ()) -> Result<()> {
-            ctx.test_res.write().await.send(ctx.internal_state).await?;
+            ctx.test_res.send(ctx.internal_state).await?;
             Ok(())
         }
 
@@ -107,12 +107,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn should_be_able_to_internally_mutate_the_ctx() {
+        // Arrange
+        const EXPECTED: &str = "foo";
+
+        struct MockCtx {
+            internal_state: Arc<Mutex<String>>,
+            test_res: tokio::sync::mpsc::Sender<()>
+        }
+        impl Context for MockCtx {}
+        impl ThreadSafeContext for MockCtx {}
+
+        let shared_state = Arc::new(Mutex::new("bar".to_string()));
+
+        let (ctx, mut test_res) = {
+            let (tx, rx) = tokio::sync::mpsc::channel(1);
+            let stream = ReceiverStream::new(rx);
+
+            (MockCtx {
+                internal_state: shared_state.clone(),
+                test_res: tx
+            }, stream)
+        };
+
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let stream = ReceiverStream::new(rx);
+
+        async fn mock_handle<'a>(ctx: Arc<MockCtx>, _event: ()) -> Result<()> {
+            {
+                let mut str = ctx.internal_state
+                    .lock()
+                    .map_err(|err| anyhow!("Locking error: {:?}", err))?;
+
+                *str = EXPECTED.to_string();
+            }
+
+            ctx.test_res.send(()).await?;
+            Ok(())
+        }
+
+        // Act
+        listen(stream, move || ctx, mock_handle);
+        tx.send(()).await.unwrap();
+        test_res.next().await;
+
+        // Assert
+        let ctx_internal_state = shared_state.lock().unwrap();
+        assert_eq!(ctx_internal_state.as_str(), EXPECTED);
+    }
+
+    #[tokio::test]
     async fn should_be_able_to_read_the_event() {
         // Arrange
         const EXPECTED: u32 = 1337;
 
         struct MockCtx {
-            test_res: RwLock<tokio::sync::mpsc::Sender<u32>>
+            test_res: tokio::sync::mpsc::Sender<u32>
         }
         impl Context for MockCtx {}
         impl ThreadSafeContext for MockCtx {}
@@ -122,7 +172,7 @@ mod tests {
             let stream = ReceiverStream::new(rx);
 
             (MockCtx {
-                test_res: RwLock::new(tx)
+                test_res: tx
             }, stream)
         };
 
@@ -130,7 +180,7 @@ mod tests {
         let stream = ReceiverStream::new(rx);
 
         async fn mock_handle<'a>(ctx: Arc<MockCtx>, event: u32) -> Result<()> {
-            ctx.test_res.write().await.send(event).await?;
+            ctx.test_res.send(event).await?;
             Ok(())
         }
 
@@ -148,7 +198,7 @@ mod tests {
         const EXPECTED: &str = "rip";
 
         struct MockCtx {
-            test_res: RwLock<tokio::sync::mpsc::Sender<Cow<'static, str>>>
+            test_res: tokio::sync::mpsc::Sender<Cow<'static, str>>
         }
         impl Context for MockCtx {}
         impl ThreadSafeContext for MockCtx {}
@@ -158,7 +208,7 @@ mod tests {
             let stream = ReceiverStream::new(rx);
 
             (MockCtx {
-                test_res: RwLock::new(tx)
+                test_res: tx
             }, stream)
         };
 
@@ -170,7 +220,7 @@ mod tests {
         }
 
         async fn mock_handle_error<'a>(ctx: Arc<MockCtx>, error: Error) -> bool {
-            ctx.test_res.write().await.send(error.to_string().into()).await.unwrap();
+            ctx.test_res.send(error.to_string().into()).await.unwrap();
             false
         }
 
@@ -189,7 +239,7 @@ mod tests {
         const EXPECTED2: &str = "oh no";
 
         struct MockCtx {
-            test_res: RwLock<tokio::sync::mpsc::Sender<Cow<'static, str>>>
+            test_res: tokio::sync::mpsc::Sender<Cow<'static, str>>
         }
         impl Context for MockCtx {}
         impl ThreadSafeContext for MockCtx {}
@@ -199,7 +249,7 @@ mod tests {
             let stream = ReceiverStream::new(rx);
 
             (MockCtx {
-                test_res: RwLock::new(tx)
+                test_res: tx
             }, stream)
         };
 
@@ -211,7 +261,7 @@ mod tests {
         }
 
         async fn mock_handle_error<'a>(ctx: Arc<MockCtx>, error: Error) -> bool {
-            ctx.test_res.write().await.send(error.to_string().into()).await.unwrap();
+            ctx.test_res.send(error.to_string().into()).await.unwrap();
             true
         }
 

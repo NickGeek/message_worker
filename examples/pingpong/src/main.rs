@@ -2,11 +2,10 @@ use anyhow::{Result, bail, Error, anyhow};
 use message_worker::{Context, ThreadSafeContext, EmptyCtx};
 use message_worker::non_blocking::{listen, listen_with_error_handler};
 use std::sync::Arc;
-use tokio::sync::RwLock;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 
-struct ActorCtx { output: RwLock<tokio::sync::broadcast::Sender<Message>> }
+struct ActorCtx { output: tokio::sync::broadcast::Sender<Message> }
 impl Context for ActorCtx {} impl ThreadSafeContext for ActorCtx {}
 
 // Create our messages
@@ -17,11 +16,7 @@ enum Message { Ping, Pong }
 async fn ping_actor(ctx: Arc<ActorCtx>, event: Message) -> Result<()> {
     match event {
         Message::Ping => bail!("I'm meant to be the pinger!"),
-        Message::Pong =>
-            ctx.output
-                .write().await
-                .send(Message::Ping)
-                .map_err(|err| anyhow!(err))?
+        Message::Pong => ctx.output.send(Message::Ping).map_err(|err| anyhow!(err))?
     };
     Ok(())
 }
@@ -29,11 +24,7 @@ async fn ping_actor(ctx: Arc<ActorCtx>, event: Message) -> Result<()> {
 // Create the pong actor
 async fn pong_actor(ctx: Arc<ActorCtx>, event: Message) -> Result<()> {
     match event {
-        Message::Ping =>
-            ctx.output
-                .write().await
-                .send(Message::Pong)
-                .map_err(|err| anyhow!(err))?,
+        Message::Ping => ctx.output.send(Message::Pong).map_err(|err| anyhow!(err))?,
         Message::Pong => bail!("I'm meant to be the ponger!")
     };
     Ok(())
@@ -73,7 +64,7 @@ async fn main() {
                 .filter(|msg| msg.is_ok())
                 .map(|msg| msg.unwrap())
         ),
-        move || ActorCtx { output: RwLock::new(tx_pong) },
+        move || ActorCtx { output: tx_pong },
         ping_actor,
         error_handler
     );
@@ -85,7 +76,7 @@ async fn main() {
                 .filter(|msg| msg.is_ok())
                 .map(|msg| msg.unwrap())
         )),
-        move || ActorCtx { output: RwLock::new(tx_ping) },
+        move || ActorCtx { output: tx_ping },
         pong_actor,
         error_handler
     );

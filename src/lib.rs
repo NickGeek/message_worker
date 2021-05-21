@@ -50,13 +50,12 @@
 //! use message_worker::{Context, ThreadSafeContext};
 //! use std::sync::Arc;
 //! use anyhow::Result;
-//! use tokio::sync::RwLock;
 //! use tokio_stream::StreamExt;
 //! use tokio_stream::wrappers::ReceiverStream;
 //!
 //! let mut rt = tokio::runtime::Runtime::new().unwrap();
 //! rt.block_on(async {
-//!     struct BiCtx { output: RwLock<tokio::sync::mpsc::Sender<usize>> }
+//!     struct BiCtx { output: tokio::sync::mpsc::Sender<usize> }
 //!     impl Context for BiCtx {} impl ThreadSafeContext for BiCtx {}
 //!
 //!     // Create our stream
@@ -64,15 +63,14 @@
 //!
 //!     // Create a listener that outputs each item in the stream multiplied by two
 //!     async fn on_item(ctx: Arc<BiCtx>, event: usize) -> Result<()> {
-//!         let mut output = ctx.output.write().await;
-//!         output.send(event * 2).await?; // Send the output
+//!         ctx.output.send(event * 2).await?; // Send the output
 //!         Ok(())
 //!     }
 //!
 //!     // Connect the number stream to `on_item`
 //!     let (tx, rx) = tokio::sync::mpsc::channel::<usize>(3);
 //!     listen(source, move || BiCtx {
-//!         output: RwLock::new(tx)
+//!         output: tx
 //!     }, on_item);
 //!
 //!     let mut  rx = ReceiverStream::new(rx);
@@ -88,13 +86,12 @@
 //! use message_worker::{Context, ThreadSafeContext};
 //! use std::sync::Arc;
 //! use anyhow::{Result, bail, anyhow};
-//! use tokio::sync::RwLock;
 //! use tokio_stream::wrappers::BroadcastStream;
 //! use tokio_stream::StreamExt;
 //!
 //! let mut rt = tokio::runtime::Runtime::new().unwrap();
 //! rt.block_on(async {
-//!     struct ActorCtx { output: RwLock<tokio::sync::broadcast::Sender<Message>> }
+//!     struct ActorCtx { output: tokio::sync::broadcast::Sender<Message> }
 //!     impl Context for ActorCtx {} impl ThreadSafeContext for ActorCtx {}
 //!
 //!     // Create our messages
@@ -106,11 +103,7 @@
 //!     async fn ping_actor(ctx: Arc<ActorCtx>, event: Message) -> Result<()> {
 //!         match event {
 //!             Message::Ping => bail!("I'm meant to be the pinger!"),
-//!             Message::Pong =>
-//!                 ctx.output
-//!                     .write().await
-//!                     .send(Message::Ping)
-//!                     .map_err(|err| anyhow!(err))?
+//!             Message::Pong => ctx.output.send(Message::Ping).map_err(|err| anyhow!(err))?
 //!         };
 //!         Ok(())
 //!     }
@@ -118,11 +111,7 @@
 //!     // Create the pong actor
 //!     async fn pong_actor(ctx: Arc<ActorCtx>, event: Message) -> Result<()> {
 //!         match event {
-//!             Message::Ping =>
-//!                 ctx.output
-//!                     .write().await
-//!                     .send(Message::Pong)
-//!                     .map_err(|err| anyhow!(err))?,
+//!             Message::Ping => ctx.output.send(Message::Pong).map_err(|err| anyhow!(err))?,
 //!             Message::Pong => bail!("I'm meant to be the ponger!")
 //!         };
 //!         Ok(())
@@ -132,22 +121,30 @@
 //!     let initial_ping = tokio_stream::iter(vec![Message::Ping]);
 //!
 //!     // Connect everything together
-//!     let (tx_ping, mut rx_ping) = tokio::sync::broadcast::channel::<Message>(128);
-//!     let (tx_pong, mut rx_pong) = tokio::sync::broadcast::channel::<Message>(128);
-//!     let mut watch_pongs = BroadcastStream::new(tx_ping.clone().subscribe()).map(|msg| msg.unwrap());
-//!     let mut watch_pings = BroadcastStream::new(tx_pong.clone().subscribe()).map(|msg| msg.unwrap());
+//!     let (tx_ping, rx_ping) = tokio::sync::broadcast::channel::<Message>(2);
+//!     let (tx_pong, rx_pong) = tokio::sync::broadcast::channel::<Message>(2);
+//!     let mut watch_pongs = BroadcastStream::new(tx_ping.clone().subscribe())
+//!         .filter(|msg| msg.is_ok())
+//!         .map(|msg| msg.unwrap());
+//!     let mut watch_pings = BroadcastStream::new(tx_pong.clone().subscribe())
+//!         .filter(|msg| msg.is_ok())
+//!         .map(|msg| msg.unwrap());
 //!
 //!     // Start the ping actor
 //!     listen(
-//!         BroadcastStream::new(rx_ping).map(|msg| msg.unwrap()),
-//!         move || ActorCtx { output: RwLock::new(tx_pong) },
+//!         BroadcastStream::new(rx_ping)
+//!             .filter(|msg| msg.is_ok())
+//!             .map(|msg| msg.unwrap()),
+//!         move || ActorCtx { output: tx_pong },
 //!         ping_actor
 //!     );
 //!
 //!     // Start the pong actor
 //!     listen(
-//!         initial_ping.chain(BroadcastStream::new(rx_pong).map(|msg| msg.unwrap())),
-//!         move || ActorCtx { output: RwLock::new(tx_ping) },
+//!         initial_ping.chain(BroadcastStream::new(rx_pong)
+//!             .filter(|msg| msg.is_ok())
+//!             .map(|msg| msg.unwrap())),
+//!         move || ActorCtx { output: tx_ping },
 //!         pong_actor
 //!     );
 //!
@@ -261,7 +258,9 @@ pub trait Context: 'static {}
 ///
 /// For mutability inside a `Context`
 /// you can use [Mutex](https://doc.rust-lang.org/std/sync/struct.Mutex.html)es
-/// or [RwLock](https://docs.rs/tokio/0.2/tokio/sync/struct.RwLock.html)s.
+/// or [RwLock](https://docs.rs/tokio/0.2/tokio/sync/struct.RwLock.html)s. In the case where the
+/// listener will br the only one with access to the item, using the standard libraries `Mutex`es/`RwLock`s
+/// can provide better performance than tokio's.
 /// The Message Worker runtime guarantees that it will never attempt to access your context
 /// in parallel from one listener.
 pub trait ThreadSafeContext: Context + Send + Sync {}
@@ -272,4 +271,76 @@ impl Context for EmptyCtx {}
 impl ThreadSafeContext for EmptyCtx {}
 
 #[cfg(test)]
-mod tests {}
+mod tests {
+    #[tokio::test]
+    async fn ping_pong() {
+        use crate::non_blocking::listen;
+        use crate::{Context, ThreadSafeContext};
+        use std::sync::Arc;
+        use anyhow::{Result, bail, anyhow};
+        use tokio_stream::wrappers::BroadcastStream;
+        use tokio_stream::StreamExt;
+
+        struct ActorCtx { output: tokio::sync::broadcast::Sender<Message> }
+        impl Context for ActorCtx {} impl ThreadSafeContext for ActorCtx {}
+
+        // Create our messages
+        #[derive(Debug, Copy, Clone, Eq, PartialEq)]
+        enum Message { Ping, Pong }
+
+
+        // Create the ping actor
+        async fn ping_actor(ctx: Arc<ActorCtx>, event: Message) -> Result<()> {
+            match event {
+                Message::Ping => bail!("I'm meant to be the pinger!"),
+                Message::Pong => ctx.output.send(Message::Ping).map_err(|err| anyhow!(err))?
+            };
+            Ok(())
+        }
+
+        // Create the pong actor
+        async fn pong_actor(ctx: Arc<ActorCtx>, event: Message) -> Result<()> {
+            match event {
+                Message::Ping => ctx.output.send(Message::Pong).map_err(|err| anyhow!(err))?,
+                Message::Pong => bail!("I'm meant to be the ponger!")
+            };
+            Ok(())
+        }
+
+        // Create our initial stream
+        let initial_ping = tokio_stream::iter(vec![Message::Ping]);
+
+        // Connect everything together
+        let (tx_ping, rx_ping) = tokio::sync::broadcast::channel::<Message>(2);
+        let (tx_pong, rx_pong) = tokio::sync::broadcast::channel::<Message>(2);
+        let mut watch_pongs = BroadcastStream::new(tx_ping.clone().subscribe())
+            .filter(|msg| msg.is_ok())
+            .map(|msg| msg.unwrap());
+        let mut watch_pings = BroadcastStream::new(tx_pong.clone().subscribe())
+            .filter(|msg| msg.is_ok())
+            .map(|msg| msg.unwrap());
+
+        // Start the ping actor
+        listen(
+            BroadcastStream::new(rx_ping)
+                .filter(|msg| msg.is_ok())
+                .map(|msg| msg.unwrap()),
+            move || ActorCtx { output: tx_pong },
+            ping_actor
+        );
+
+        // Start the pong actor
+        listen(
+            initial_ping.chain(BroadcastStream::new(rx_pong)
+                .filter(|msg| msg.is_ok())
+                .map(|msg| msg.unwrap())),
+            move || ActorCtx { output: tx_ping },
+            pong_actor
+        );
+
+        assert_eq!(watch_pings.next().await, Some(Message::Ping));
+        assert_eq!(watch_pongs.next().await, Some(Message::Pong));
+        assert_eq!(watch_pings.next().await, Some(Message::Ping));
+        assert_eq!(watch_pongs.next().await, Some(Message::Pong));
+    }
+}
