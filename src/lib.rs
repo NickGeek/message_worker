@@ -233,7 +233,9 @@
 pub mod blocking;
 /// Listeners that don't block and work with threadsafe (`Sync` + `Send`) data.
 pub mod non_blocking;
-mod context_holder;
+
+use std::error::Error;
+use std::ops::{Deref, DerefMut};
 
 /// This trait needs to be implemented by the item you're using as the state for the listener.
 ///
@@ -255,11 +257,50 @@ pub trait Context: 'static {}
 /// in parallel from one listener.
 pub trait ThreadSafeContext: Context + Send + Sync {}
 
+pub struct HandlerResult<Ctx: Context, E: Into<anyhow::Error> = anyhow::Error> {
+    inner: Result<Ctx, (Ctx, E)>
+}
+
+impl<Ctx: Context, E: Into<anyhow::Error>> Deref for HandlerResult<Ctx, E> {
+    type Target = Result<Ctx, (Ctx, E)>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl<Ctx: Context, E: Into<anyhow::Error>> DerefMut for HandlerResult<Ctx, E> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
+    }
+}
+
+impl<Ctx: Context, E: Into<anyhow::Error>> From<Result<Ctx, (Ctx, E)>> for HandlerResult<Ctx, E> {
+    fn from(res: Result<Ctx, (Ctx, E)>) -> Self {
+        HandlerResult { inner: res }
+    }
+}
+
+impl<Ctx: Context, E: Into<anyhow::Error>> Into<Result<Ctx, (Ctx, E)>> for HandlerResult<Ctx, E> {
+    fn into(self) -> Result<Ctx, (Ctx, E)> {
+        self.inner
+    }
+}
+
+pub fn attempt<Ctx: Context, E: Into<anyhow::Error>, F>(mut ctx: Ctx, func: F) -> HandlerResult<Ctx, E> where
+    F: FnOnce(&mut Ctx) -> Result<(), E>
+{
+    HandlerResult::from(match func(&mut ctx) {
+        Ok(_) => Ok(ctx),
+        Err(err) => Err((ctx, err))
+    })
+}
+
 /// A predefined context for listeners that don't need any state.
 pub struct EmptyCtx;
 impl Context for EmptyCtx {}
 impl ThreadSafeContext for EmptyCtx {}
-
+/*
 #[cfg(test)]
 mod tests {
     #[tokio::test]
@@ -269,6 +310,7 @@ mod tests {
         use anyhow::{Result, bail, anyhow};
         use tokio_stream::wrappers::BroadcastStream;
         use tokio_stream::StreamExt;
+        use std::sync::Arc;
 
         struct ActorCtx { output: tokio::sync::broadcast::Sender<Message> }
         impl Context for ActorCtx {} impl ThreadSafeContext for ActorCtx {}
@@ -279,7 +321,7 @@ mod tests {
 
 
         // Create the ping actor
-        async fn ping_actor(ctx: &mut ActorCtx, event: Message) -> Result<()> {
+        async fn ping_actor(ctx: Arc<ActorCtx>, event: Message) -> Result<()> {
             match event {
                 Message::Ping => bail!("I'm meant to be the pinger!"),
                 Message::Pong => ctx.output.send(Message::Ping).map_err(|err| anyhow!(err))?
@@ -288,7 +330,7 @@ mod tests {
         }
 
         // Create the pong actor
-        async fn pong_actor(ctx: &mut ActorCtx, event: Message) -> Result<()> {
+        async fn pong_actor(ctx: Arc<ActorCtx>, event: Message) -> Result<()> {
             match event {
                 Message::Ping => ctx.output.send(Message::Pong).map_err(|err| anyhow!(err))?,
                 Message::Pong => bail!("I'm meant to be the ponger!")
@@ -333,3 +375,4 @@ mod tests {
         assert_eq!(watch_pongs.next().await, Some(Message::Pong));
     }
 }
+*/
