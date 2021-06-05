@@ -1,6 +1,5 @@
 #![deny(missing_docs)]
 #![warn(missing_doc_code_examples)]
-
 //! Message Worker is a library for Rust for the creation of event-listeners using futures and
 //! streams. Notably, Message Worker supports non-sync and non-send (i.e. non-thread-safe)
 //! contexts within listeners.
@@ -10,11 +9,30 @@
 //!
 //! This library must be used in a [tokio](https://tokio.rs/) runtime.
 //!
+//! The tl;dr is that if you want a worker that accepts a stream of messages/events and does
+//! something upon receiving each message asynchronously... this is the library for you!
+//! The key function here is `message_worker::[non_]blocking::listen(stream, || ctx, handler)`.
+//!
+//! The first argument is a [Stream](https://docs.rs/futures-core/0.3.15/futures_core/stream/trait.Stream.html).
+//! Streams are basically asynchronous iterators and can be made from many different things including
+//! mpsc/broadcast channels.
+//!
+//! The second argument is a closure that creates the "context" for the worker. Essentially, this is
+//! any state you want your worker to have access to. With a [non_blocking](non_blocking) worker it's generally best to
+//! use immutable datastructures, like those from [im](https://docs.rs/im/15.0.0/im/) if you need to modify the
+//! state. With a [blocking](blocking) worker, you can simply wrap your state in a [`RefCell`](https://doc.rust-lang.org/std/cell/struct.RefCell.html).
+//!
+//! The third argument is the handler, which is where the magic happens. The handler is the name of a function
+//! you declare with the signature `fn(ctx: Arc/Rc<Context>, msg: MessageType) -> Result<Option<Context>, Err>`.
+//! If an error is returned the error handler for the worker will run. If `Ok(None)` is returned the
+//! worker will continue running as-is. If `Ok(context)` is returned the worker will continue running
+//! but the next time it runs it will use the new context in that return value.
+//!
 //! # Examples
 //! ## Printer
 //! ```
 //! use message_worker::non_blocking::listen;
-//! use message_worker::EmptyCtx;
+//! use message_worker::{empty_ctx, EmptyCtx};
 //! use std::sync::Arc;
 //! use anyhow::Result;
 //!
@@ -24,13 +42,13 @@
 //!     let source = tokio_stream::iter(vec![42, 0xff6900, 1337]);
 //!
 //!     // Create a listener that prints out each item in the stream
-//!     async fn on_item(_ctx: &mut EmptyCtx, event: usize) -> Result<()> {
+//!     async fn on_item(_ctx: Arc<EmptyCtx>, event: usize) -> Result<Option<EmptyCtx>> {
 //!         eprintln!("{}", event);
-//!         Ok(())
+//!         Ok(None)
 //!     }
 //!
 //!     // Start listening
-//!     listen(source, move || EmptyCtx, on_item).await.unwrap();
+//!     listen(source, empty_ctx, on_item).await.unwrap();
 //!
 //!     /* Prints:
 //!        42
@@ -43,7 +61,6 @@
 //! ## Two-way communication
 //! ```
 //! use message_worker::non_blocking::listen;
-//! use message_worker::{Context, ThreadSafeContext};
 //! use std::sync::Arc;
 //! use anyhow::Result;
 //! use tokio_stream::StreamExt;
@@ -52,15 +69,14 @@
 //! let mut rt = tokio::runtime::Runtime::new().unwrap();
 //! rt.block_on(async {
 //!     struct BiCtx { output: tokio::sync::mpsc::Sender<usize> }
-//!     impl Context for BiCtx {} impl ThreadSafeContext for BiCtx {}
 //!
 //!     // Create our stream
 //!     let source = tokio_stream::iter(vec![42, 0xff6900, 1337]);
 //!
 //!     // Create a listener that outputs each item in the stream multiplied by two
-//!     async fn on_item(ctx: &mut BiCtx, event: usize) -> Result<()> {
+//!     async fn on_item(ctx: Arc<BiCtx>, event: usize) -> Result<Option<BiCtx>> {
 //!         ctx.output.send(event * 2).await?; // Send the output
-//!         Ok(())
+//!         Ok(None)
 //!     }
 //!
 //!     // Connect the number stream to `on_item`
@@ -79,16 +95,14 @@
 //! ## Ping-pong (Actors)
 //! ```no_run
 //! use message_worker::non_blocking::listen;
-//! use message_worker::{Context, ThreadSafeContext};
 //! use std::sync::Arc;
 //! use anyhow::{Result, bail, anyhow};
 //! use tokio_stream::wrappers::BroadcastStream;
 //! use tokio_stream::StreamExt;
 //!
-//! let mut rt = tokio::runtime::Runtime::new().unwrap();
-//! rt.block_on(async {
+//! #[tokio::main]
+//! async fn main() {
 //!     struct ActorCtx { output: tokio::sync::broadcast::Sender<Message> }
-//!     impl Context for ActorCtx {} impl ThreadSafeContext for ActorCtx {}
 //!
 //!     // Create our messages
 //!     #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -96,21 +110,21 @@
 //!
 //!
 //!     // Create the ping actor
-//!     async fn ping_actor(ctx: &mut ActorCtx, event: Message) -> Result<()> {
+//!     async fn ping_actor(ctx: Arc<ActorCtx>, event: Message) -> Result<Option<ActorCtx>> {
 //!         match event {
 //!             Message::Ping => bail!("I'm meant to be the pinger!"),
-//!             Message::Pong => { let _ = ctx.output.send(Message::Ping); }
+//!             Message::Pong => ctx.output.send(Message::Ping).map_err(|err| anyhow!(err))?
 //!         };
-//!         Ok(())
+//!         Ok(None)
 //!     }
 //!
 //!     // Create the pong actor
-//!     async fn pong_actor(ctx: &mut ActorCtx, event: Message) -> Result<()> {
+//!     async fn pong_actor(ctx: Arc<ActorCtx>, event: Message) -> Result<Option<ActorCtx>> {
 //!         match event {
-//!             Message::Ping => { let _ = ctx.output.send(Message::Pong); },
+//!             Message::Ping => ctx.output.send(Message::Pong).map_err(|err| anyhow!(err))?,
 //!             Message::Pong => bail!("I'm meant to be the ponger!")
 //!         };
-//!         Ok(())
+//!         Ok(None)
 //!     }
 //!
 //!     // Create our initial stream
@@ -148,26 +162,25 @@
 //!     assert_eq!(watch_pongs.next().await, Some(Message::Pong));
 //!     assert_eq!(watch_pings.next().await, Some(Message::Ping));
 //!     assert_eq!(watch_pongs.next().await, Some(Message::Pong));
-//! })
+//! }
 //! ```
 //!
 //! ## The Wild Example (calling V8's C++ via Deno within an event listener to run JS)
 //! ```
 //! use message_worker::blocking::listen;
-//! use message_worker::Context;
 //! use deno_core::{JsRuntime, RuntimeOptions};
 //! use std::rc::Rc;
+//! use std::cell::RefCell;
 //! use anyhow::Result;
 //! use tokio_stream::StreamExt;
 //! use tokio_stream::wrappers::ReceiverStream;
 //!
 //! let mut rt = tokio::runtime::Runtime::new().unwrap();
 //! rt.block_on(async {
-//!     struct MockCtx {
+//!     struct Context {
 //!         test_res: tokio::sync::mpsc::Sender<()>,
 //!         runtime: JsRuntime
 //!     }
-//!     impl Context for MockCtx {}
 //!
 //!     let (mut tx, rx) = tokio::sync::mpsc::channel::<()>(1);
 //!     let stream = ReceiverStream::new(rx);
@@ -177,7 +190,8 @@
 //!         (tx, ReceiverStream::new(rx))
 //!     };
 //!
-//!     async fn mock_handle(ctx: &mut MockCtx, _event: ()) -> Result<()> {
+//!     async fn mock_handle(ctx: Rc<RefCell<Context>>, _event: ()) -> Result<Option<RefCell<Context>>> {
+//!         let mut ctx = (&*ctx).borrow_mut();
 //!         let runtime = &mut ctx.runtime;
 //!
 //!         runtime.execute(
@@ -187,7 +201,7 @@
 //!         runtime.run_event_loop().await?;
 //!
 //!         ctx.test_res.send(()).await?;
-//!         Ok(())
+//!         Ok(None)
 //!     }
 //!
 //!     listen(stream, move || {
@@ -213,10 +227,10 @@
 //!             })
 //!         };
 //!
-//!         MockCtx {
+//!         RefCell::new(Context {
 //!             test_res: test_res_tx,
 //!             runtime
-//!         }
+//!         })
 //!     }, mock_handle);
 //!     tx.send(()).await.unwrap();
 //!
@@ -229,49 +243,31 @@
 //! ```
 //!
 
+
 /// Listeners that perform CPU intensive/blocking tasks or work with non-threadsafe data
 pub mod blocking;
 /// Listeners that don't block and work with threadsafe (`Sync` + `Send`) data.
 pub mod non_blocking;
-mod context_holder;
 
-/// This trait needs to be implemented by the item you're using as the state for the listener.
-///
-/// For example, if the listener has no state you can simply go:
-/// ```
-/// use message_worker::Context;
-/// struct EmptyCtx;
-/// impl Context for EmptyCtx {}
-/// ```
-///
-/// `EmptyCtx` can now be used as the context for your listeners. The Message Worker
-/// runtime guarantees that it will never attempt to access your context in parallel from one listener.
-pub trait Context: 'static {}
-
-/// If you are using a [`non_blocking`](non_blocking) listener, this implementation is required
-/// alongside `Context`.
-///
-/// The Message Worker runtime guarantees that it will never attempt to access your context
-/// in parallel from one listener.
-pub trait ThreadSafeContext: Context + Send + Sync {}
+/// The type of the empty context (unit)
+pub type EmptyCtx = ();
 
 /// A predefined context for listeners that don't need any state.
-pub struct EmptyCtx;
-impl Context for EmptyCtx {}
-impl ThreadSafeContext for EmptyCtx {}
+#[inline]
+pub const fn empty_ctx() -> () {}
 
 #[cfg(test)]
 mod tests {
+
     #[tokio::test]
     async fn ping_pong() {
         use crate::non_blocking::listen;
-        use crate::{Context, ThreadSafeContext};
         use anyhow::{Result, bail, anyhow};
         use tokio_stream::wrappers::BroadcastStream;
         use tokio_stream::StreamExt;
+        use std::sync::Arc;
 
         struct ActorCtx { output: tokio::sync::broadcast::Sender<Message> }
-        impl Context for ActorCtx {} impl ThreadSafeContext for ActorCtx {}
 
         // Create our messages
         #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -279,21 +275,21 @@ mod tests {
 
 
         // Create the ping actor
-        async fn ping_actor(ctx: &mut ActorCtx, event: Message) -> Result<()> {
+        async fn ping_actor(ctx: Arc<ActorCtx>, event: Message) -> Result<Option<ActorCtx>> {
             match event {
                 Message::Ping => bail!("I'm meant to be the pinger!"),
                 Message::Pong => ctx.output.send(Message::Ping).map_err(|err| anyhow!(err))?
             };
-            Ok(())
+            Ok(None)
         }
 
         // Create the pong actor
-        async fn pong_actor(ctx: &mut ActorCtx, event: Message) -> Result<()> {
+        async fn pong_actor(ctx: Arc<ActorCtx>, event: Message) -> Result<Option<ActorCtx>> {
             match event {
                 Message::Ping => ctx.output.send(Message::Pong).map_err(|err| anyhow!(err))?,
                 Message::Pong => bail!("I'm meant to be the ponger!")
             };
-            Ok(())
+            Ok(None)
         }
 
         // Create our initial stream
