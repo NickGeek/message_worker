@@ -1,42 +1,53 @@
-use anyhow::{Result, bail, Error, anyhow};
-use message_worker::{Context, EmptyCtx};
+use anyhow::{Result, bail, anyhow};
 use message_worker::blocking::{listen, listen_with_error_handler};
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
+use std::rc::Rc;
+use std::cell::RefCell;
 
 struct ActorCtx { output: tokio::sync::broadcast::Sender<Message> }
-impl Context for ActorCtx {}
 
 // Create our messages
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 enum Message { Ping, Pong }
 
 // Create the ping actor
-async fn ping_actor(ctx: &mut ActorCtx, event: Message) -> Result<()> {
+async fn ping_actor(ctx: Rc<ActorCtx>, event: Message) -> Result<Option<ActorCtx>> {
     match event {
         Message::Ping => bail!("I'm meant to be the pinger!"),
         Message::Pong => ctx.output.send(Message::Ping).map_err(|err| anyhow!(err))?
     };
-    Ok(())
+    Ok(None)
 }
 
 // Create the pong actor
-async fn pong_actor(ctx: &mut ActorCtx, event: Message) -> Result<()> {
+async fn pong_actor(ctx: Rc<ActorCtx>, event: Message) -> Result<Option<ActorCtx>> {
     match event {
         Message::Ping => ctx.output.send(Message::Pong).map_err(|err| anyhow!(err))?,
         Message::Pong => bail!("I'm meant to be the ponger!")
     };
-    Ok(())
+    Ok(None)
 }
 
-async fn error_handler(_ctx: &mut ActorCtx, error: Error) -> bool {
+async fn error_handler(_ctx: Rc<ActorCtx>, error: Box<dyn std::error::Error + Send + Sync>) -> bool {
     eprintln!("There was an error sending an item: {:?}", error);
     true
 }
 
-async fn printer(_ctx: &mut EmptyCtx, msg: Message) -> Result<()> {
-    println!("{:?}", msg);
-    Ok(())
+async fn printer(ctx: Rc<RefCell<String>>, msg: Message) -> Result<Option<RefCell<String>>> {
+    let mut buf = ctx.borrow_mut();
+    let msg = match msg {
+        Message::Ping => "ping!\n",
+        Message::Pong => "pong!\n"
+    };
+
+    buf.push_str(msg);
+
+    if buf.len() == buf.capacity() {
+        print!("{}", buf);
+        buf.clear();
+    }
+    Ok(None)
 }
 
 #[tokio::main]
@@ -77,5 +88,5 @@ async fn main() {
     );
 
     // Start the printer so we can see the chatter
-    listen(print_stream, || EmptyCtx, printer).await.unwrap();
+    listen(print_stream, || RefCell::new(String::with_capacity(6 * 10666)), printer).await.unwrap();
 }

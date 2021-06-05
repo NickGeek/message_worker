@@ -1,6 +1,6 @@
 [package]
 name = "message_worker"
-version = "0.4.0"
+version = "0.5.0"
 authors = ["Nick Webster <nick@nick.geek.nz>"]
 repository = "https://github.com/NickGeek/message_worker/"
 description = "Message Worker is a low-ish level library for Rust for the creation of event-listeners using futures and streams. Notably MW supports non-sync and non-send (i.e. non-thread-safe) contexts within listeners."
@@ -18,10 +18,11 @@ harness = false
 [dependencies]
 tokio = { version = "^1.6.0", features = ["rt-multi-thread", "sync", "parking_lot"] }
 tokio-stream = { version = "~0.1.6", features = ["sync"] }
-anyhow = "^1.0.40"
+ees = "~0.2.5"
 
 [dev-dependencies]
 tokio = { version = "^1.6.0", features = ["rt-multi-thread", "sync", "parking_lot", "macros", "test-util"] }
 deno_core = "~0.88.0"
 criterion = { version = "~0.3.4", features = ["async_tokio", "html_reports"] }
 futures = "~0.3.15"
+anyhow = "^1.0.40"

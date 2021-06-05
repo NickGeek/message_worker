@@ -12,3 +12,4 @@ message_worker = { path = "../.." }
 tokio = { version = "^1.6.0", features = ["rt-multi-thread", "sync", "macros", "parking_lot"] }
 anyhow = "^1.0.40"
 tokio-stream = { version = "~0.1.6", features = ["sync"] }
+im = "^15.0.0"

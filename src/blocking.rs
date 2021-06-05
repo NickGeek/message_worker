@@ -1,10 +1,8 @@
 use std::future::Future;
-use anyhow::{Result, Error};
+use ees::Error;
 use tokio::task::JoinHandle;
 use tokio_stream::{Stream, StreamExt};
-
-use crate::Context;
-use crate::context_holder::ContextHolder;
+use std::rc::Rc;
 
 /// Creates a listener with the default error handler on its own system thread. It is safe to work
 /// with non-sync and non-send data in this listener. The callback (`handle_event`) will be invoked
@@ -14,11 +12,9 @@ use crate::context_holder::ContextHolder;
 /// # Example
 /// ```
 /// use message_worker::blocking::listen;
-/// use message_worker::Context;
-/// use tokio::sync::RwLock;
 /// use std::rc::Rc;
-/// use anyhow::Result;
 /// use tokio_stream::StreamExt;
+/// use ees::Error;
 /// use tokio_stream::wrappers::ReceiverStream;
 ///
 /// # let mut rt = tokio::runtime::Runtime::new().unwrap();
@@ -26,12 +22,11 @@ use crate::context_holder::ContextHolder;
 /// // Arrange
 /// const EXPECTED: &str = "foo";
 ///
-/// struct MockCtx {
+/// struct Ctx {
 ///     // `Rc` is not threadsafe but we can safely use it here
 ///     internal_state: std::rc::Rc<String>,
 ///     test_res: tokio::sync::mpsc::Sender<String>
 /// }
-/// impl Context for MockCtx {}
 ///
 /// let (mut tx, rx) = tokio::sync::mpsc::channel::<()>(1);
 /// let stream = ReceiverStream::new(rx);
@@ -41,35 +36,36 @@ use crate::context_holder::ContextHolder;
 ///     (tx, ReceiverStream::new(rx))
 /// };
 ///
-/// async fn mock_handle(ctx: &mut MockCtx, _event: ()) -> Result<()> {
+/// async fn handle(ctx: Rc<Ctx>, _event: ()) -> Result<Option<Ctx>, Error> {
 ///     // Accessing from an `Rc`
 ///     let str = (&*ctx.internal_state).clone();
 ///
 ///     ctx.test_res.send(str).await?;
-///     Ok(())
+///     Ok(None)
 /// }
 ///
 /// // Act
-/// listen(stream, move || MockCtx {
+/// listen(stream, move || Ctx {
 ///     internal_state: std::rc::Rc::new(EXPECTED.to_string()),
 ///     test_res: test_res_tx
-/// }, mock_handle);
+/// }, handle);
 /// tx.send(()).await.unwrap();
 ///
 /// // Assert
 /// assert_eq!(test_res.next().await, Some(EXPECTED.to_string()))
 /// # })
 /// ```
-pub fn listen<Ctx, CtxFactory, Source, Message, HandleEventFuture>(
+pub fn listen<Ctx, CtxFactory, Source, Message, HandleEventFuture, HandleMessageErrorT>(
     source: Source,
     context_factory: CtxFactory,
-    handle_message: fn(&'static mut Ctx, Message) -> HandleEventFuture
+    handle_message: fn(Rc<Ctx>, Message) -> HandleEventFuture
 ) -> JoinHandle<()> where
-    Ctx: Context,
+    Ctx: 'static,
     CtxFactory: (FnOnce() -> Ctx) + Send + 'static,
     Source: Stream<Item =Message> + Unpin + Send + 'static,
     Message: 'static,
-    HandleEventFuture: Future<Output = Result<()>> + 'static,
+    HandleEventFuture: Future<Output = Result<Option<Ctx>, HandleMessageErrorT>> + 'static,
+    HandleMessageErrorT: Into<Error> + Send,
 {
     listen_with_error_handler(source, context_factory, handle_message, default_error_handler)
 }
@@ -81,10 +77,10 @@ pub fn listen<Ctx, CtxFactory, Source, Message, HandleEventFuture>(
 /// # Example
 /// ```
 /// use message_worker::blocking::listen_with_error_handler;
-/// use message_worker::Context;
 /// use std::borrow::Cow;
 /// use std::rc::Rc;
-/// use anyhow::{Error, Result, bail};
+/// use anyhow::{Result, bail};
+/// use ees::Error;
 /// use tokio_stream::StreamExt;
 /// use tokio_stream::wrappers::ReceiverStream;
 ///
@@ -97,7 +93,6 @@ pub fn listen<Ctx, CtxFactory, Source, Message, HandleEventFuture>(
 /// struct MockCtx {
 ///     test_res: tokio::sync::mpsc::Sender<Cow<'static, str>>
 /// }
-/// impl Context for MockCtx {}
 ///
 /// let (ctx, mut test_res) = {
 ///     let (tx, rx) = tokio::sync::mpsc::channel(1);
@@ -111,11 +106,11 @@ pub fn listen<Ctx, CtxFactory, Source, Message, HandleEventFuture>(
 /// let (mut tx, rx) = tokio::sync::mpsc::channel::<Cow<'static, str>>(1);
 /// let stream = ReceiverStream::new(rx);
 ///
-/// async fn mock_handle(_ctx: &mut MockCtx, event: Cow<'static, str>) -> Result<()> {
+/// async fn mock_handle(_ctx: Rc<MockCtx>, event: Cow<'static, str>) -> Result<Option<MockCtx>> {
 ///     bail!(event)
 /// }
 ///
-/// async fn mock_handle_error(ctx: &mut MockCtx, error: Error) -> bool {
+/// async fn mock_handle_error(ctx: Rc<MockCtx>, error: Error) -> bool {
 ///     ctx.test_res.send(error.to_string().into()).await.unwrap();
 ///     true
 /// }
@@ -131,28 +126,36 @@ pub fn listen<Ctx, CtxFactory, Source, Message, HandleEventFuture>(
 /// assert_eq!(test_res.next().await.unwrap(), Cow::Borrowed(EXPECTED2));
 /// # }
 /// ```
-pub fn listen_with_error_handler<Ctx, CtxFactory, Source, Message, HandleEventFuture, HandleErrorFuture>(
+pub fn listen_with_error_handler<Ctx, CtxFactory, Source, Message, HandleEventFuture, HandleMessageErrorT, HandleErrorFuture>(
     mut source: Source,
     context_factory: CtxFactory,
-    handle_message: fn(&'static mut Ctx, Message) -> HandleEventFuture,
-    handle_error: fn(&'static mut Ctx, Error) -> HandleErrorFuture
+    handle_message: fn(Rc<Ctx>, Message) -> HandleEventFuture,
+    handle_error: fn(Rc<Ctx>, Error) -> HandleErrorFuture
 ) -> JoinHandle<()> where
-    Ctx: Context,
+    Ctx: 'static,
     CtxFactory: (FnOnce() -> Ctx) + Send + 'static,
     Source: Stream<Item =Message> + Unpin + Send + 'static,
     Message: 'static,
-    HandleEventFuture: Future<Output = Result<()>> + 'static,
+    HandleEventFuture: Future<Output = Result<Option<Ctx>, HandleMessageErrorT>> + 'static,
+    HandleMessageErrorT: Into<Error> + Send,
     HandleErrorFuture: Future<Output = bool> + 'static
 {
     tokio::task::spawn_blocking(move || {
-        let mut context = ContextHolder::new(context_factory());
+        let mut context = Rc::new(context_factory());
 
         let tokio_rt = tokio::runtime::Handle::current();
-        tokio_rt.block_on(async {
+        tokio_rt.block_on(async move {
             while let Some(message) = source.next().await {
-                if let Err(err) = handle_message(context.get_mut(), message).await {
-                    if !handle_error(context.get_mut(), err).await {
-                        break;
+                match handle_message(context.clone(), message).await {
+                    Ok(new_ctx) => {
+                        if let Some(new_ctx) = new_ctx {
+                            context = Rc::new(new_ctx);
+                        }
+                    }
+                    Err(err) => {
+                        if !handle_error(context.clone(), err.into()).await {
+                            break;
+                        }
                     }
                 }
             }
@@ -160,7 +163,7 @@ pub fn listen_with_error_handler<Ctx, CtxFactory, Source, Message, HandleEventFu
     })
 }
 
-async fn default_error_handler<Ctx: Context>(_ctx: &mut Ctx, err: Error) -> bool {
+async fn default_error_handler<Ctx: 'static>(_ctx: Rc<Ctx>, err: Error) -> bool {
     eprintln!("There was an error running the message worker: {:?}", err);
     false
 }
@@ -169,7 +172,7 @@ async fn default_error_handler<Ctx: Context>(_ctx: &mut Ctx, err: Error) -> bool
 mod tests {
     use super::*;
     use std::borrow::Cow;
-    use anyhow::{bail, anyhow};
+    use anyhow::{bail, anyhow, Result};
     use tokio_stream::wrappers::ReceiverStream;
 
     #[tokio::test]
@@ -177,11 +180,11 @@ mod tests {
         // Arrange
         const EXPECTED: u32 = 1337;
 
+        #[derive(Debug)]
         struct MockCtx {
             internal_state: u32,
             test_res: tokio::sync::mpsc::Sender<u32>
         }
-        impl Context for MockCtx {}
 
         let (ctx, mut test_res) = {
             let (tx, rx) = tokio::sync::mpsc::channel::<u32>(1);
@@ -196,9 +199,9 @@ mod tests {
         let (tx, rx) = tokio::sync::mpsc::channel::<()>(1);
         let stream = ReceiverStream::new(rx);
 
-        async fn mock_handle(ctx: &mut MockCtx, _event: ()) -> Result<()> {
+        async fn mock_handle(ctx: Rc<MockCtx>, _event: ()) -> Result<Option<MockCtx>> {
             ctx.test_res.send(ctx.internal_state).await?;
-            Ok(())
+            Ok(None)
         }
 
         // Act
@@ -218,7 +221,6 @@ mod tests {
             internal_state: std::rc::Rc<String>,
             test_res: tokio::sync::mpsc::Sender<String>
         }
-        impl Context for MockCtx {}
 
         let (tx, rx) = tokio::sync::mpsc::channel::<()>(1);
         let stream = ReceiverStream::new(rx);
@@ -228,10 +230,10 @@ mod tests {
             (tx, ReceiverStream::new(rx))
         };
 
-        async fn mock_handle(ctx: &mut MockCtx, _event: ()) -> Result<()> {
+        async fn mock_handle(ctx: Rc<MockCtx>, _event: ()) -> Result<Option<MockCtx>> {
             let str = (&*ctx.internal_state).clone();
             ctx.test_res.send(str).await?;
-            Ok(())
+            Ok(None)
         }
 
         // Act
@@ -246,6 +248,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn should_be_able_to_replace_the_ctx() {
+        // Arrange
+        const EXPECTED: &str = "foo";
+
+        struct MockCtx {
+            internal_state: String,
+            test_res: tokio::sync::mpsc::Sender<String>
+        }
+
+        let (ctx, mut test_res) = {
+            let (tx, rx) = tokio::sync::mpsc::channel(1);
+            let stream = ReceiverStream::new(rx);
+
+            (MockCtx {
+                internal_state: "bar".to_string(),
+                test_res: tx
+            }, stream)
+        };
+
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let stream = ReceiverStream::new(rx);
+
+        async fn mock_handle(ctx: Rc<MockCtx>, _event: ()) -> Result<Option<MockCtx>> {
+            ctx.test_res.send(ctx.internal_state.clone()).await?;
+            Ok(Some(MockCtx { internal_state: EXPECTED.to_string(), test_res: ctx.test_res.clone() }))
+        }
+
+        // Act
+        listen(stream, move || ctx, mock_handle);
+        tx.send(()).await.unwrap();
+        tx.send(()).await.unwrap();
+
+        // Assert
+        assert_ne!(test_res.next().await.unwrap(), EXPECTED); // "bar"
+        assert_eq!(test_res.next().await.unwrap(), EXPECTED); // "foo"
+    }
+
+    #[tokio::test]
     async fn should_be_able_to_read_the_event() {
         // Arrange
         const EXPECTED: u32 = 1337;
@@ -253,7 +293,6 @@ mod tests {
         struct MockCtx {
             test_res: tokio::sync::mpsc::Sender<u32>
         }
-        impl Context for MockCtx {}
 
         let (ctx, mut test_res) = {
             let (tx, rx) = tokio::sync::mpsc::channel::<u32>(1);
@@ -267,9 +306,9 @@ mod tests {
         let (tx, rx) = tokio::sync::mpsc::channel::<u32>(1);
         let stream = ReceiverStream::new(rx);
 
-        async fn mock_handle(ctx: &mut MockCtx, event: u32) -> Result<()> {
+        async fn mock_handle(ctx: Rc<MockCtx>, event: u32) -> Result<Option<MockCtx>> {
             ctx.test_res.send(event).await?;
-            Ok(())
+            Ok(None)
         }
 
         // Act
@@ -288,7 +327,6 @@ mod tests {
         struct MockCtx {
             test_res: tokio::sync::mpsc::Sender<Cow<'static, str>>
         }
-        impl Context for MockCtx {}
 
         let (ctx, mut test_res) = {
             let (tx, rx) = tokio::sync::mpsc::channel(1);
@@ -302,11 +340,11 @@ mod tests {
         let (tx, rx) = tokio::sync::mpsc::channel::<()>(1);
         let stream = ReceiverStream::new(rx);
 
-        async fn mock_handle(_ctx: &mut MockCtx, _event: ()) -> Result<()> {
+        async fn mock_handle(_ctx: Rc<MockCtx>, _event: ()) -> Result<Option<MockCtx>> {
             bail!("rip")
         }
 
-        async fn mock_handle_error(ctx: &mut MockCtx, error: Error) -> bool {
+        async fn mock_handle_error(ctx: Rc<MockCtx>, error: Error) -> bool {
             ctx.test_res.send(error.to_string().into()).await.unwrap();
             false
         }
@@ -328,7 +366,6 @@ mod tests {
         struct MockCtx {
             test_res: tokio::sync::mpsc::Sender<Cow<'static, str>>
         }
-        impl Context for MockCtx {}
 
         let (ctx, mut test_res) = {
             let (tx, rx) = tokio::sync::mpsc::channel(1);
@@ -342,11 +379,11 @@ mod tests {
         let (tx, rx) = tokio::sync::mpsc::channel::<Cow<'static, str>>(1);
         let stream = ReceiverStream::new(rx);
 
-        async fn mock_handle(_ctx: &mut MockCtx, event: Cow<'static, str>) -> Result<()> {
+        async fn mock_handle(_ctx: Rc<MockCtx>, event: Cow<'static, str>) -> Result<Option<MockCtx>> {
             bail!(event)
         }
 
-        async fn mock_handle_error(ctx: &mut MockCtx, error: Error) -> bool {
+        async fn mock_handle_error(ctx: Rc<MockCtx>, error: Error) -> bool {
             ctx.test_res.send(error.to_string().into()).await.unwrap();
             true
         }
@@ -365,6 +402,7 @@ mod tests {
         use super::*;
         use deno_core::{JsRuntime, RuntimeOptions};
         use std::rc::Rc;
+        use std::cell::RefCell;
 
         #[tokio::test]
         async fn should_be_able_to_create_a_deno_runtime() {
@@ -372,7 +410,6 @@ mod tests {
             struct MockCtx {
                 test_res: tokio::sync::mpsc::Sender<Vec<u8>>
             }
-            impl Context for MockCtx {}
 
             let (ctx, mut test_res) = {
                 let (tx, rx) = tokio::sync::mpsc::channel(1);
@@ -386,7 +423,7 @@ mod tests {
             let (tx, rx) = tokio::sync::mpsc::channel::<()>(1);
             let stream = ReceiverStream::new(rx);
 
-            async fn mock_handle(ctx: &mut MockCtx, _event: ()) -> Result<()> {
+            async fn mock_handle(ctx: Rc<MockCtx>, _event: ()) -> Result<Option<MockCtx>> {
                 let mut failure_msg: Option<String> = None;
 
                 /*
@@ -416,9 +453,9 @@ mod tests {
 
                 let snapshot = Vec::from(runtime.snapshot().as_ref());
 
-                let res: Result<()> = match failure_msg {
+                let res: Result<Option<MockCtx>> = match failure_msg {
                     Some(msg) => Err(anyhow!("{}", msg)),
-                    None => Ok(())
+                    None => Ok(None)
                 };
 
                 ctx.test_res.send(snapshot).await?;
@@ -443,7 +480,6 @@ mod tests {
                 test_res: tokio::sync::mpsc::Sender<()>,
                 runtime: JsRuntime
             }
-            impl Context for MockCtx {}
 
             let (tx, rx) = tokio::sync::mpsc::channel::<()>(1);
             let stream = ReceiverStream::new(rx);
@@ -453,7 +489,8 @@ mod tests {
                 (tx, ReceiverStream::new(rx))
             };
 
-            async fn mock_handle(ctx: &mut MockCtx, _event: ()) -> Result<()> {
+            async fn mock_handle(ctx: Rc<RefCell<MockCtx>>, _event: ()) -> Result<Option<RefCell<MockCtx>>> {
+                let mut ctx = (&*ctx).borrow_mut();
                 let runtime = &mut ctx.runtime;
 
                 runtime.execute(
@@ -463,7 +500,7 @@ mod tests {
                 runtime.run_event_loop().await?;
 
                 ctx.test_res.send(()).await?;
-                Ok(())
+                Ok(None)
             }
 
             // Act
@@ -493,10 +530,10 @@ mod tests {
                     })
                 };
 
-                MockCtx {
+                RefCell::new(MockCtx {
                     test_res: test_res_tx,
                     runtime: runtime
-                }
+                })
             }, mock_handle);
 
             const COUNT: u32 = 10;

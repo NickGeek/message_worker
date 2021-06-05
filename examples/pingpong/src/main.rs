@@ -1,42 +1,62 @@
-use anyhow::{Result, bail, Error, anyhow};
-use message_worker::{Context, ThreadSafeContext, EmptyCtx};
+use anyhow::{Result, bail, anyhow};
 use message_worker::non_blocking::{listen, listen_with_error_handler};
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
+use std::sync::Arc;
 
 struct ActorCtx { output: tokio::sync::broadcast::Sender<Message> }
-impl Context for ActorCtx {} impl ThreadSafeContext for ActorCtx {}
 
 // Create our messages
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 enum Message { Ping, Pong }
 
 // Create the ping actor
-async fn ping_actor(ctx: &mut ActorCtx, event: Message) -> Result<()> {
+async fn ping_actor(ctx: Arc<ActorCtx>, event: Message) -> Result<Option<ActorCtx>> {
     match event {
         Message::Ping => bail!("I'm meant to be the pinger!"),
         Message::Pong => ctx.output.send(Message::Ping).map_err(|err| anyhow!(err))?
     };
-    Ok(())
+    Ok(None)
 }
 
 // Create the pong actor
-async fn pong_actor(ctx: &mut ActorCtx, event: Message) -> Result<()> {
+async fn pong_actor(ctx: Arc<ActorCtx>, event: Message) -> Result<Option<ActorCtx>> {
     match event {
         Message::Ping => ctx.output.send(Message::Pong).map_err(|err| anyhow!(err))?,
         Message::Pong => bail!("I'm meant to be the ponger!")
     };
-    Ok(())
+    Ok(None)
 }
 
-async fn error_handler(_ctx: &mut ActorCtx, error: Error) -> bool {
+async fn error_handler(_ctx: Arc<ActorCtx>, error: Box<dyn std::error::Error + Send + Sync>) -> bool {
     eprintln!("There was an error sending an item: {:?}", error);
     true
 }
 
-async fn printer(_ctx: &mut EmptyCtx, msg: Message) -> Result<()> {
-    println!("{:?}", msg);
-    Ok(())
+async fn printer(ctx: Arc<im::Vector<u8>>, msg: Message) -> Result<Option<im::Vector<u8>>> {
+    let mut buf = (&*ctx).clone();
+    let msg = match msg {
+        Message::Ping => "ping!\n",
+        Message::Pong => "pong!\n"
+    };
+
+    for char in msg.as_bytes() {
+        buf.push_back(*char);
+    }
+
+    const CAPACITY: usize = 6 * 10666; // Close-ish to 64KB
+    if buf.len() == CAPACITY {
+        let mut str = Vec::<u8>::with_capacity(CAPACITY);
+        for byte in buf.iter() {
+            str.push(*byte)
+        }
+
+        // Safety: We know these are all valid utf-8 chars because we converted them from utf-8 chars
+        // earlier.
+        unsafe { print!("{}", std::str::from_utf8_unchecked(str.as_slice())); }
+        buf.clear();
+    }
+    Ok(Some(buf))
 }
 
 #[tokio::main]
@@ -81,5 +101,5 @@ async fn main() {
     );
 
     // Start the printer so we can see the chatter
-    listen(print_stream, || EmptyCtx, printer).await.unwrap();
+    listen(print_stream, || im::Vector::<u8>::new(), printer).await.unwrap();
 }
