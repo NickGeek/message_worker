@@ -1,8 +1,9 @@
 use std::future::Future;
+use std::rc::Rc;
+
 use ees::Error;
 use tokio::task::JoinHandle;
 use tokio_stream::{Stream, StreamExt};
-use std::rc::Rc;
 
 /// Creates a listener with the default error handler on its own system thread. It is safe to work
 /// with non-sync and non-send data in this listener. The callback (`handle_event`) will be invoked
@@ -62,7 +63,7 @@ pub fn listen<Ctx, CtxFactory, Source, Message, HandleEventFuture, HandleMessage
 ) -> JoinHandle<()> where
     Ctx: 'static,
     CtxFactory: (FnOnce() -> Ctx) + Send + 'static,
-    Source: Stream<Item =Message> + Unpin + Send + 'static,
+    Source: Stream<Item = Message> + Unpin + Send + 'static,
     Message: 'static,
     HandleEventFuture: Future<Output = Result<Option<Ctx>, HandleMessageErrorT>> + 'static,
     HandleMessageErrorT: Into<Error> + Send,
@@ -170,10 +171,12 @@ async fn default_error_handler<Ctx: 'static>(_ctx: Rc<Ctx>, err: Error) -> bool 
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::borrow::Cow;
-    use anyhow::{bail, anyhow, Result};
+
+    use anyhow::{anyhow, bail, Result};
     use tokio_stream::wrappers::ReceiverStream;
+
+    use super::*;
 
     #[tokio::test]
     async fn should_be_able_read_ctx_from_handler() {
@@ -399,10 +402,12 @@ mod tests {
     }
 
     mod deno {
-        use super::*;
-        use deno_core::{JsRuntime, RuntimeOptions};
-        use std::rc::Rc;
         use std::cell::RefCell;
+        use std::rc::Rc;
+
+        use deno_core::{ascii_str, JsRuntime, JsRuntimeForSnapshot, RuntimeOptions, RuntimeSnapshotOptions};
+
+        use super::*;
 
         #[tokio::test]
         async fn should_be_able_to_create_a_deno_runtime() {
@@ -431,20 +436,21 @@ mod tests {
                  * drop the snapshot creator before taking a snapshot, so uhh,
                  * no early exits plz
                  */
-                let mut runtime = JsRuntime::new(RuntimeOptions {
+                let mut runtime = JsRuntimeForSnapshot::new(RuntimeOptions {
                     module_loader: Some(Rc::new(deno_core::FsModuleLoader)),
-                    will_snapshot: true,
                     ..RuntimeOptions::default()
+                }, RuntimeSnapshotOptions {
+                    snapshot_module_load_cb: None
                 });
 
-                if let Err(e) = runtime.execute("<test>", r#"const a = 1 + 1;"#) {
+                if let Err(e) = runtime.execute_script_static("<test>", r#"const a = 1 + 1;"#) {
                     failure_msg = Some(match failure_msg {
                         Some(msg) => format!("{}\n{}", msg, e),
                         None => format!("{}", e)
                     });
                 }
 
-                if let Err(e) = runtime.run_event_loop().await {
+                if let Err(e) = runtime.run_event_loop(false).await {
                     failure_msg = Some(match failure_msg {
                         Some(msg) => format!("{}\n{}", msg, e),
                         None => format!("{}", e)
@@ -493,11 +499,11 @@ mod tests {
                 let mut ctx = (&*ctx).borrow_mut();
                 let runtime = &mut ctx.runtime;
 
-                runtime.execute(
+                runtime.execute_script(
                     "<test>",
-                    r#"Deno.core.print(`[should_be_able_to_store_the_runtime_on_the_ctx] Got event: ${++a}\n`);"#
+                    ascii_str!(r#"Deno.core.print(`[should_be_able_to_store_the_runtime_on_the_ctx] Got event: ${++a}\n`);"#)
                 )?;
-                runtime.run_event_loop().await?;
+                runtime.run_event_loop(false).await?;
 
                 ctx.test_res.send(()).await?;
                 Ok(None)
@@ -512,18 +518,17 @@ mod tests {
                         local.run_until(async {
                             let mut runtime = JsRuntime::new(RuntimeOptions {
                                 module_loader: Some(Rc::new(deno_core::FsModuleLoader)),
-                                will_snapshot: false,
                                 ..RuntimeOptions::default()
                             });
 
-                            runtime.execute(
+                            runtime.execute_script_static(
                                 "<test>",
                                 r#"
                                     Deno.core.print(`[should_be_able_to_store_the_runtime_on_the_ctx] Creating runtime\n`);
                                     let a = 0;
                                 "#
                             ).unwrap();
-                            runtime.run_event_loop().await.unwrap();
+                            runtime.run_event_loop(false).await.unwrap();
 
                             runtime
                         }).await
