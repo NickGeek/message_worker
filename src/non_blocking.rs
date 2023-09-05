@@ -15,7 +15,7 @@ pub fn listen<Ctx, CtxFactory, Source, Message, HandleMessageFuture, HandleMessa
 ) -> JoinHandle<()> where
     Ctx: Send + Sync + 'static,
     CtxFactory: (FnOnce() -> Ctx) + Send + 'static,
-    Source: Stream<Item =Message> + Unpin + Send + 'static,
+    Source: Stream<Item = Message> + Unpin + Send + 'static,
     Message: Send + 'static,
     HandleMessageFuture: Future<Output = Result<Option<Ctx>, HandleMessageErrorT>> + Send + 'static,
     HandleMessageErrorT: Into<Error> + Send,

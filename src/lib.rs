@@ -1,5 +1,5 @@
 #![deny(missing_docs)]
-#![warn(missing_doc_code_examples)]
+#![warn(rustdoc::missing_doc_code_examples)]
 //! Message Worker is a library for Rust for the creation of event-listeners using futures and
 //! streams. Notably, Message Worker supports non-sync and non-send (i.e. non-thread-safe)
 //! contexts within listeners.
@@ -194,11 +194,11 @@
 //!         let mut ctx = (&*ctx).borrow_mut();
 //!         let runtime = &mut ctx.runtime;
 //!
-//!         runtime.execute(
+//!         runtime.execute_script_static(
 //!             "<test>",
 //!             r#"Deno.core.print(`Got a message!\n`);"#
 //!         )?;
-//!         runtime.run_event_loop().await?;
+//!         runtime.run_event_loop(false).await?;
 //!
 //!         ctx.test_res.send(()).await?;
 //!         Ok(None)
@@ -212,15 +212,14 @@
 //!                 local.run_until(async {
 //!                     let mut runtime = JsRuntime::new(RuntimeOptions {
 //!                         module_loader: Some(Rc::new(deno_core::FsModuleLoader)),
-//!                         will_snapshot: false,
 //!                         ..RuntimeOptions::default()
 //!                     });
 //!
-//!                     runtime.execute(
+//!                     runtime.execute_script_static(
 //!                         "<test>",
 //!                         r#"Deno.core.print(`Starting up the JS runtime via C++ FFI and Deno 🤯\n`);"#
 //!                     ).unwrap();
-//!                     runtime.run_event_loop().await.unwrap();
+//!                     runtime.run_event_loop(false).await.unwrap();
 //!
 //!                     runtime
 //!                 }).await
@@ -254,7 +253,7 @@ pub type EmptyCtx = ();
 
 /// A predefined context for listeners that don't need any state.
 #[inline]
-pub const fn empty_ctx() -> () {}
+pub const fn empty_ctx() {}
 
 #[cfg(test)]
 mod tests {
