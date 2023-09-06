@@ -1,4 +1,9 @@
 # Changelog
+## v0.6
+### Breaking
+- The context can be anything that implements clone. To get the behaviour from v0.5.x, wrap contexts in `Arc::new`
+for `non_blocking` and `Rc::new` for `blocking`.
+
 ## v0.5
 ### Breaking
 - Switched back to guarding contexts with `Rc`/`Arc`. Interior mutability is still possible with the power of `RefCell`.
