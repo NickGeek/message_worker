@@ -1,9 +1,10 @@
-use anyhow::{Result, bail, anyhow};
+use anyhow::{anyhow, bail, Result};
 use message_worker::non_blocking::{listen, listen_with_error_handler};
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
-use std::sync::Arc;
 
+#[derive(Clone)]
+#[repr(transparent)]
 struct ActorCtx { output: tokio::sync::broadcast::Sender<Message> }
 
 // Create our messages
@@ -11,7 +12,7 @@ struct ActorCtx { output: tokio::sync::broadcast::Sender<Message> }
 enum Message { Ping, Pong }
 
 // Create the ping actor
-async fn ping_actor(ctx: Arc<ActorCtx>, event: Message) -> Result<Option<ActorCtx>> {
+async fn ping_actor(ctx: ActorCtx, event: Message) -> Result<Option<ActorCtx>> {
     match event {
         Message::Ping => bail!("I'm meant to be the pinger!"),
         Message::Pong => ctx.output.send(Message::Ping).map_err(|err| anyhow!(err))?
@@ -20,7 +21,7 @@ async fn ping_actor(ctx: Arc<ActorCtx>, event: Message) -> Result<Option<ActorCt
 }
 
 // Create the pong actor
-async fn pong_actor(ctx: Arc<ActorCtx>, event: Message) -> Result<Option<ActorCtx>> {
+async fn pong_actor(ctx: ActorCtx, event: Message) -> Result<Option<ActorCtx>> {
     match event {
         Message::Ping => ctx.output.send(Message::Pong).map_err(|err| anyhow!(err))?,
         Message::Pong => bail!("I'm meant to be the ponger!")
@@ -28,13 +29,13 @@ async fn pong_actor(ctx: Arc<ActorCtx>, event: Message) -> Result<Option<ActorCt
     Ok(None)
 }
 
-async fn error_handler(_ctx: Arc<ActorCtx>, error: Box<dyn std::error::Error + Send + Sync>) -> bool {
+async fn error_handler(_ctx: ActorCtx, error: Box<dyn std::error::Error + Send + Sync>) -> bool {
     eprintln!("There was an error sending an item: {:?}", error);
     true
 }
 
-async fn printer(ctx: Arc<im::Vector<u8>>, msg: Message) -> Result<Option<im::Vector<u8>>> {
-    let mut buf = (&*ctx).clone();
+async fn printer(ctx: im::Vector<u8>, msg: Message) -> Result<Option<im::Vector<u8>>> {
+    let mut buf = ctx;
     let msg = match msg {
         Message::Ping => "ping!\n",
         Message::Pong => "pong!\n"

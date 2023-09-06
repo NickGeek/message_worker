@@ -42,7 +42,7 @@
 //!     let source = tokio_stream::iter(vec![42, 0xff6900, 1337]);
 //!
 //!     // Create a listener that prints out each item in the stream
-//!     async fn on_item(_ctx: Arc<EmptyCtx>, event: usize) -> Result<Option<EmptyCtx>> {
+//!     async fn on_item(_ctx: EmptyCtx, event: usize) -> Result<Option<EmptyCtx>> {
 //!         eprintln!("{}", event);
 //!         Ok(None)
 //!     }
@@ -68,13 +68,15 @@
 //!
 //! let mut rt = tokio::runtime::Runtime::new().unwrap();
 //! rt.block_on(async {
+//!     #[derive(Clone)]
+//!     #[repr(transparent)]
 //!     struct BiCtx { output: tokio::sync::mpsc::Sender<usize> }
 //!
 //!     // Create our stream
 //!     let source = tokio_stream::iter(vec![42, 0xff6900, 1337]);
 //!
 //!     // Create a listener that outputs each item in the stream multiplied by two
-//!     async fn on_item(ctx: Arc<BiCtx>, event: usize) -> Result<Option<BiCtx>> {
+//!     async fn on_item(ctx: BiCtx, event: usize) -> Result<Option<BiCtx>> {
 //!         ctx.output.send(event * 2).await?; // Send the output
 //!         Ok(None)
 //!     }
@@ -102,6 +104,8 @@
 //!
 //! #[tokio::main]
 //! async fn main() {
+//!     #[derive(Clone)]
+//!     #[repr(transparent)]
 //!     struct ActorCtx { output: tokio::sync::broadcast::Sender<Message> }
 //!
 //!     // Create our messages
@@ -110,7 +114,7 @@
 //!
 //!
 //!     // Create the ping actor
-//!     async fn ping_actor(ctx: Arc<ActorCtx>, event: Message) -> Result<Option<ActorCtx>> {
+//!     async fn ping_actor(ctx: ActorCtx, event: Message) -> Result<Option<ActorCtx>> {
 //!         match event {
 //!             Message::Ping => bail!("I'm meant to be the pinger!"),
 //!             Message::Pong => ctx.output.send(Message::Ping).map_err(|err| anyhow!(err))?
@@ -119,7 +123,7 @@
 //!     }
 //!
 //!     // Create the pong actor
-//!     async fn pong_actor(ctx: Arc<ActorCtx>, event: Message) -> Result<Option<ActorCtx>> {
+//!     async fn pong_actor(ctx: ActorCtx, event: Message) -> Result<Option<ActorCtx>> {
 //!         match event {
 //!             Message::Ping => ctx.output.send(Message::Pong).map_err(|err| anyhow!(err))?,
 //!             Message::Pong => bail!("I'm meant to be the ponger!")
@@ -190,8 +194,8 @@
 //!         (tx, ReceiverStream::new(rx))
 //!     };
 //!
-//!     async fn mock_handle(ctx: Rc<RefCell<Context>>, _event: ()) -> Result<Option<RefCell<Context>>> {
-//!         let mut ctx = (&*ctx).borrow_mut();
+//!     async fn mock_handle(ctx: Rc<RefCell<Context>>, _event: ()) -> Result<Option<Rc<RefCell<Context>>>> {
+//!         let mut ctx = (*ctx).borrow_mut();
 //!         let runtime = &mut ctx.runtime;
 //!
 //!         runtime.execute_script_static(
@@ -226,10 +230,10 @@
 //!             })
 //!         };
 //!
-//!         RefCell::new(Context {
+//!         Rc::new(RefCell::new(Context {
 //!             test_res: test_res_tx,
 //!             runtime
-//!         })
+//!         }))
 //!     }, mock_handle);
 //!     tx.send(()).await.unwrap();
 //!
@@ -264,8 +268,9 @@ mod tests {
         use anyhow::{Result, bail, anyhow};
         use tokio_stream::wrappers::BroadcastStream;
         use tokio_stream::StreamExt;
-        use std::sync::Arc;
 
+        #[derive(Clone)]
+        #[repr(transparent)]
         struct ActorCtx { output: tokio::sync::broadcast::Sender<Message> }
 
         // Create our messages
@@ -274,7 +279,7 @@ mod tests {
 
 
         // Create the ping actor
-        async fn ping_actor(ctx: Arc<ActorCtx>, event: Message) -> Result<Option<ActorCtx>> {
+        async fn ping_actor(ctx: ActorCtx, event: Message) -> Result<Option<ActorCtx>> {
             match event {
                 Message::Ping => bail!("I'm meant to be the pinger!"),
                 Message::Pong => ctx.output.send(Message::Ping).map_err(|err| anyhow!(err))?
@@ -283,7 +288,7 @@ mod tests {
         }
 
         // Create the pong actor
-        async fn pong_actor(ctx: Arc<ActorCtx>, event: Message) -> Result<Option<ActorCtx>> {
+        async fn pong_actor(ctx: ActorCtx, event: Message) -> Result<Option<ActorCtx>> {
             match event {
                 Message::Ping => ctx.output.send(Message::Pong).map_err(|err| anyhow!(err))?,
                 Message::Pong => bail!("I'm meant to be the ponger!")
