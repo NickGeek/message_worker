@@ -1,7 +1,8 @@
 use std::future::Future;
-use ees::Error;
 use tokio::task::JoinHandle;
 use tokio_stream::{Stream, StreamExt};
+
+use crate::{Error, HandlerError};
 
 /// Creates a listener with the default error handler on its own system thread. It is safe to work
 /// with non-sync and non-send data in this listener. The callback (`handle_message`) will be invoked
@@ -17,7 +18,7 @@ pub fn listen<Ctx, CtxFactory, Source, Message, HandleMessageFuture, HandleMessa
     Source: Stream<Item = Message> + Unpin + Send + 'static,
     Message: Send + 'static,
     HandleMessageFuture: Future<Output = Result<Option<Ctx>, HandleMessageErrorT>> + Send + 'static,
-    HandleMessageErrorT: Into<Error> + Send,
+    HandleMessageErrorT: Into<HandlerError> + Send,
 {
     listen_with_error_handler(source, context_factory, handle_message, default_error_handler)
 }
@@ -36,7 +37,7 @@ pub fn listen_with_error_handler<Ctx, CtxFactory, Source, Message, HandleMessage
     Source: Stream<Item = Message> + Unpin + Send + 'static,
     Message: Send + 'static,
     HandleMessageFuture: Future<Output = Result<Option<Ctx>, HandleMessageErrorT>> + Send + 'static,
-    HandleMessageErrorT: Into<Error> + Send,
+    HandleMessageErrorT: Into<HandlerError> + Send,
     HandleErrorFuture: Future<Output = bool> + Send + 'static,
 {
     tokio::spawn(async move {
@@ -50,7 +51,7 @@ pub fn listen_with_error_handler<Ctx, CtxFactory, Source, Message, HandleMessage
                     }
                 }
                 Err(err) => {
-                    if !handle_error(context.clone(), err.into()).await {
+                    if !handle_error(context.clone(), Error::Handler(err.into())).await {
                         break;
                     }
                 }

@@ -172,7 +172,7 @@
 //! ## The Wild Example (calling V8's C++ via Deno within an event listener to run JS)
 //! ```
 //! use message_worker::blocking::listen;
-//! use deno_core::{JsRuntime, RuntimeOptions};
+//! use deno_core::{JsRuntime, PollEventLoopOptions, RuntimeOptions};
 //! use std::rc::Rc;
 //! use std::cell::RefCell;
 //! use anyhow::Result;
@@ -198,11 +198,11 @@
 //!         let mut ctx = (*ctx).borrow_mut();
 //!         let runtime = &mut ctx.runtime;
 //!
-//!         runtime.execute_script_static(
+//!         runtime.execute_script(
 //!             "<test>",
 //!             r#"Deno.core.print(`Got a message!\n`);"#
 //!         )?;
-//!         runtime.run_event_loop(false).await?;
+//!         runtime.run_event_loop(PollEventLoopOptions::default()).await?;
 //!
 //!         ctx.test_res.send(()).await?;
 //!         Ok(None)
@@ -219,11 +219,11 @@
 //!                         ..RuntimeOptions::default()
 //!                     });
 //!
-//!                     runtime.execute_script_static(
+//!                     runtime.execute_script(
 //!                         "<test>",
 //!                         r#"Deno.core.print(`Starting up the JS runtime via C++ FFI and Deno 🤯\n`);"#
 //!                     ).unwrap();
-//!                     runtime.run_event_loop(false).await.unwrap();
+//!                     runtime.run_event_loop(PollEventLoopOptions::default()).await.unwrap();
 //!
 //!                     runtime
 //!                 }).await
@@ -251,6 +251,21 @@
 pub mod blocking;
 /// Listeners that don't block and work with threadsafe (`Sync` + `Send`) data.
 pub mod non_blocking;
+
+/// The error type that a message handler can return. All error types that implement
+/// `std::error::Error + Send + Sync` convert into this type, thus `?` works on them in a handler.
+pub type HandlerError = Box<dyn std::error::Error + Send + Sync>;
+
+/// The result type that a message handler can return. The default error type is [`HandlerError`].
+pub type Result<T, E = HandlerError> = std::result::Result<T, E>;
+
+/// The error that a listener gives to its error handler.
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    /// An error that the message handler returned.
+    #[error(transparent)]
+    Handler(#[from] HandlerError),
+}
 
 /// The type of the empty context (unit)
 pub type EmptyCtx = ();

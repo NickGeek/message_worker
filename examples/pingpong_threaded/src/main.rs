@@ -31,7 +31,7 @@ async fn pong_actor(ctx: ActorCtx, event: Message) -> Result<Option<ActorCtx>> {
     Ok(None)
 }
 
-async fn error_handler(_ctx: ActorCtx, error: Box<dyn std::error::Error + Send + Sync>) -> bool {
+async fn error_handler(_ctx: ActorCtx, error: message_worker::Error) -> bool {
     eprintln!("There was an error sending an item: {:?}", error);
     true
 }
