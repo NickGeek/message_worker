@@ -1,8 +1,9 @@
 use std::future::Future;
 
-use ees::Error;
 use tokio::task::JoinHandle;
 use tokio_stream::{Stream, StreamExt};
+
+use crate::{Error, HandlerError};
 
 /// Creates a listener with the default error handler on its own system thread. It is safe to work
 /// with non-sync and non-send data in this listener. The callback (`handle_event`) will be invoked
@@ -14,7 +15,6 @@ use tokio_stream::{Stream, StreamExt};
 /// use message_worker::blocking::listen;
 /// use std::rc::Rc;
 /// use tokio_stream::StreamExt;
-/// use ees::Error;
 /// use tokio_stream::wrappers::ReceiverStream;
 ///
 /// # let mut rt = tokio::runtime::Runtime::new().unwrap();
@@ -37,7 +37,7 @@ use tokio_stream::{Stream, StreamExt};
 ///     (tx, ReceiverStream::new(rx))
 /// };
 ///
-/// async fn handle(ctx: Ctx, _event: ()) -> Result<Option<Ctx>, Error> {
+/// async fn handle(ctx: Ctx, _event: ()) -> message_worker::Result<Option<Ctx>> {
 ///     // Accessing from an `Rc`
 ///     let str = (&*ctx.internal_state).clone();
 ///
@@ -66,7 +66,7 @@ pub fn listen<Ctx, CtxFactory, Source, Message, HandleEventFuture, HandleMessage
     Source: Stream<Item = Message> + Unpin + Send + 'static,
     Message: 'static,
     HandleEventFuture: Future<Output = Result<Option<Ctx>, HandleMessageErrorT>> + 'static,
-    HandleMessageErrorT: Into<Error> + Send,
+    HandleMessageErrorT: Into<HandlerError> + Send,
 {
     listen_with_error_handler(source, context_factory, handle_message, default_error_handler)
 }
@@ -81,7 +81,7 @@ pub fn listen<Ctx, CtxFactory, Source, Message, HandleEventFuture, HandleMessage
 /// use std::borrow::Cow;
 /// use std::rc::Rc;
 /// use anyhow::{Result, bail};
-/// use ees::Error;
+/// use message_worker::Error;
 /// use tokio_stream::StreamExt;
 /// use tokio_stream::wrappers::ReceiverStream;
 ///
@@ -140,7 +140,7 @@ pub fn listen_with_error_handler<Ctx, CtxFactory, Source, Message, HandleEventFu
     Source: Stream<Item = Message> + Unpin + Send + 'static,
     Message: 'static,
     HandleEventFuture: Future<Output = Result<Option<Ctx>, HandleMessageErrorT>> + 'static,
-    HandleMessageErrorT: Into<Error> + Send,
+    HandleMessageErrorT: Into<HandlerError> + Send,
     HandleErrorFuture: Future<Output = bool> + 'static
 {
     tokio::task::spawn_blocking(move || {
@@ -156,7 +156,7 @@ pub fn listen_with_error_handler<Ctx, CtxFactory, Source, Message, HandleEventFu
                         }
                     }
                     Err(err) => {
-                        if !handle_error(context.clone(), err.into()).await {
+                        if !handle_error(context.clone(), Error::Handler(err.into())).await {
                             break;
                         }
                     }
@@ -409,7 +409,7 @@ mod tests {
         use std::cell::RefCell;
         use std::rc::Rc;
 
-        use deno_core::{ascii_str, JsRuntime, JsRuntimeForSnapshot, RuntimeOptions, RuntimeSnapshotOptions};
+        use deno_core::{JsRuntime, JsRuntimeForSnapshot, PollEventLoopOptions, RuntimeOptions};
 
         use super::*;
 
@@ -443,18 +443,16 @@ mod tests {
                 let mut runtime = JsRuntimeForSnapshot::new(RuntimeOptions {
                     module_loader: Some(Rc::new(deno_core::FsModuleLoader)),
                     ..RuntimeOptions::default()
-                }, RuntimeSnapshotOptions {
-                    snapshot_module_load_cb: None
                 });
 
-                if let Err(e) = runtime.execute_script_static("<test>", r#"const a = 1 + 1;"#) {
+                if let Err(e) = runtime.execute_script("<test>", r#"const a = 1 + 1;"#) {
                     failure_msg = Some(match failure_msg {
                         Some(msg) => format!("{}\n{}", msg, e),
                         None => format!("{}", e)
                     });
                 }
 
-                if let Err(e) = runtime.run_event_loop(false).await {
+                if let Err(e) = runtime.run_event_loop(PollEventLoopOptions::default()).await {
                     failure_msg = Some(match failure_msg {
                         Some(msg) => format!("{}\n{}", msg, e),
                         None => format!("{}", e)
@@ -505,9 +503,9 @@ mod tests {
 
                 runtime.execute_script(
                     "<test>",
-                    ascii_str!(r#"Deno.core.print(`[should_be_able_to_store_the_runtime_on_the_ctx] Got event: ${++a}\n`);"#)
+                    r#"Deno.core.print(`[should_be_able_to_store_the_runtime_on_the_ctx] Got event: ${++a}\n`);"#
                 )?;
-                runtime.run_event_loop(false).await?;
+                runtime.run_event_loop(PollEventLoopOptions::default()).await?;
 
                 ctx.test_res.send(()).await?;
                 Ok(None)
@@ -525,14 +523,14 @@ mod tests {
                                 ..RuntimeOptions::default()
                             });
 
-                            runtime.execute_script_static(
+                            runtime.execute_script(
                                 "<test>",
                                 r#"
                                     Deno.core.print(`[should_be_able_to_store_the_runtime_on_the_ctx] Creating runtime\n`);
                                     let a = 0;
                                 "#
                             ).unwrap();
-                            runtime.run_event_loop(false).await.unwrap();
+                            runtime.run_event_loop(PollEventLoopOptions::default()).await.unwrap();
 
                             runtime
                         }).await
